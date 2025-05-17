@@ -1,0 +1,8 @@
+numpy
+pandas
+torch>=2.0.0
+scikit-learn
+matplotlib
+h5py
+tables
+seaborn
