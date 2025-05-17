@@ -1,7 +1,7 @@
 # VAE Phase Classification
 
 Projekt do rekonstrukcji i klasyfikacji faz magnetycznych za pomocą warunkowego wariacyjnego autoenkodera (Conditional VAE).  
-Wspiera analizę wyników symulacji mikromagnetycznych – predykcję i rekonstrukcję tekstur magnetycznych (`200x200x3`) na podstawie parametrów wejściowych.
+Wspiera analizę wyników symulacji mikromagnetycznych – predykcję i rekonstrukcję struktur spinowych na podstawie parametrów materiałowych oraz geometrycznych układu.
 
 ---
 
