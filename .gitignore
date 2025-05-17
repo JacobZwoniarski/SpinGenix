@@ -1,0 +1,17 @@
+# Pliki danych
+data/
+models/
+experiments/
+*.h5
+*.npz
+
+# Pliki systemowe/edytora
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+
+# Pliki środowiskowe
+.env
+.venv/
+env/
