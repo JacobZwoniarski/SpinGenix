@@ -1,0 +1,71 @@
+// Documentation available at https://mumax.github.io/api.html
+
+
+Tex := {Tx} // Total size of the system in x direction
+Tey := {Tx} // Total size of the system in y direction
+Tez := {Tz} // Total size of the system in z direction (thickness)
+ 
+if Tex <= 20e-9 {
+    Nx = 20
+    Ny = 20
+} else if Tex > 20e-9 && Tex < 50e-9 {
+    Nx = 50
+    Ny = 50
+} else if Tex > 50e-9 && Tex < 100e-9 {
+    Nx = 100
+    Ny = 100
+} else if Tex > 100e-9 && Tex < 150e-9 {
+    Nx = 150
+    Ny = 150
+}
+ 
+ 
+if Tez <= 30e-9{
+    Nz = 1
+} else {
+    Nz = 2
+}
+ 
+Tx = Tex
+Ty = Tey
+Tz = Tez
+print(Nx, Ny, Nz,)
+ 
+// Nx = Tx/dx // number of cells in x direction, it is implicit
+// Ny = Ty/dy // number of cells in y direction, it is implicit
+// Nz = Tz/dz // number of cells in z direction, it is implicit
+edgesmooth=8
+ 
+SmoothMesh(True, True, True)
+setgeom(cylinder(Tex,Tez))
+ 
+// Saturation magnetization = the strength of the magnetic field created by the material
+Msat = 8.0e5
+// Exchange stiffness = how likely the spins are to align with each other
+ 
+Aex = 1.3e-11
+ 
+maxerr=1e-6
+// external magnetic field and initial magnetic configuration
+B_ext = vector(1e-7, 1e-9, 1e-9)
+setsolver(6)
+alpha=0.1
+temp=300
+fixdt=1e-14
+m=randommag()
+run(1e-9)
+relax()
+temp=0
+// The state of the system is artificial and we need to relax it to find the energy minimum
+// runs the LLG equation until an energy minimum is found
+maxerr=1e-6
+run(1e-10)
+relax()
+minimize()
+print(ext_topologicalcharge)
+q:=ext_topologicalcharge
+tableadd(ext_topologicalcharge)
+tablesave()
+snapshotas(m,"m_relaxed.png")
+saveas(m,"m_relaxed")
+print(m)
