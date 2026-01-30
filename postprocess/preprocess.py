@@ -1,142 +1,176 @@
+from __future__ import annotations
+
 import os
-import re
+from typing import Tuple, Dict, Any
+
 import numpy as np
 import zarr
-from pyzfn import Pyzfn
-import discretisedfield as dfield
-
-# ------------------------------------------------------------
-# Parse scientific notation from folder/file names
-# ------------------------------------------------------------
-
-def parse_scientific_notation(s: str) -> float:
-    match = re.search(r'(\d+(?:\.\d+)?e-\d+)', s)
-    return float(match.group(1)) if match else None
+import torch
+import torch.nn.functional as F
 
 
-# ------------------------------------------------------------
-# Skyrmion number (topological charge)
-# ------------------------------------------------------------
-
-def compute_topological_charge(mx, my, mz, dx=1.0, dy=1.0):
-    dmx_dx = (np.roll(mx, -1, axis=1) - np.roll(mx, 1, axis=1)) / (2 * dx)
-    dmy_dx = (np.roll(my, -1, axis=1) - np.roll(my, 1, axis=1)) / (2 * dx)
-    dmz_dx = (np.roll(mz, -1, axis=1) - np.roll(mz, 1, axis=1)) / (2 * dx)
-
-    dmx_dy = (np.roll(mx, -1, axis=0) - np.roll(mx, 1, axis=0)) / (2 * dy)
-    dmy_dy = (np.roll(my, -1, axis=0) - np.roll(my, 1, axis=0)) / (2 * dy)
-    dmz_dy = (np.roll(mz, -1, axis=0) - np.roll(mz, 1, axis=0)) / (2 * dy)
-
-    cross_x = dmy_dx * dmz_dy - dmz_dx * dmy_dy
-    cross_y = dmz_dx * dmx_dy - dmx_dx * dmz_dy
-    cross_z = dmx_dx * dmy_dy - dmy_dx * dmx_dy
-
-    q = mx * cross_x + my * cross_y + mz * cross_z
-    Q = np.sum(q) * dx * dy / (4 * np.pi)
-    return float(Q)
+def _parse_Tx_Tz_from_path(zarr_path: str) -> tuple[float, float]:
+    tx = np.nan
+    tz = np.nan
+    parts = zarr_path.replace("\\", "/").split("/")
+    for p in parts:
+        if p.startswith("Tx_"):
+            try:
+                tx = float(p.split("_", 1)[1])
+            except Exception:
+                pass
+        if p.startswith("Tz_") and p.endswith(".zarr"):
+            try:
+                tz = float(p.split("_", 1)[1].replace(".zarr", ""))
+            except Exception:
+                pass
+    return float(tx), float(tz)
 
 
-# ------------------------------------------------------------
-# Resampling arbitrary mesh → fixed (200×200×3)
-# ------------------------------------------------------------
+def _resize_hw3(field_hw3: np.ndarray, target_size=(200, 200)) -> np.ndarray:
+    Ht, Wt = target_size
+    if field_hw3.shape[-1] != 3:
+        raise ValueError(f"Expected last dim=3, got {field_hw3.shape}")
+    H, W = field_hw3.shape[:2]
+    if (H, W) == (Ht, Wt):
+        return field_hw3.astype(np.float32)
 
-def resample_field_to_200(m, job):
+    x = torch.from_numpy(field_hw3.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)  # (1,3,H,W)
+    x = F.interpolate(x, size=(Ht, Wt), mode="bilinear", align_corners=False)
+    out = x.squeeze(0).permute(1, 2, 0).cpu().numpy().astype(np.float32)
+    return out
+
+
+def _pick_state_idx(meta: dict, n_states: int, default: int = 0) -> int:
+    s = meta.get("State", meta.get("state", None))
+    try:
+        s = int(s)
+    except Exception:
+        s = None
+    if s is not None and 0 <= s < n_states:
+        return s
+    return int(default)
+
+
+def _to_hw3(m: np.ndarray, meta: dict) -> np.ndarray:
     """
-    m : raw magnetization array from zarr (t,x,y,z,3)
-    returns field (200,200,3)
-    """
+    Normalizuje różne kształty do (H,W,3).
 
-    fo = m[0]   # (x,y,z,3)
-    print("fo shape:", fo.shape)
-
-    # dfield expects (nx, ny, nz, 3)
-    field_arr = fo   # shape already (x,y,z,3)
-
-    # build mesh
-    nx, ny, nz = field_arr.shape[:3]
-    cell = (job.Tx/nx, job.Ty/ny, job.Tz/nz)
-    mesh = dfield.Mesh(p1=(0,0,0), p2=(job.Tx, job.Ty, job.Tz), cell=cell)
-
-    m_field = dfield.Field(mesh, nvdim=3, value=field_arr, norm=1)
-
-    # resample to 200×200×1 (z collapsed)
-    resampled_field = m_field.resample((200,200,1)).array  # (200,200,1,3)
-
-    # drop z dimension
-    resampled_field = resampled_field[:,:,0,:]  # (200,200,3)
-
-    return resampled_field
-
-
-# ------------------------------------------------------------
-# State classification logic
-# ------------------------------------------------------------
-
-def classify_state(mx, my, mz, b, Q):
-    mean_mz = abs(np.mean(mz))
-
-    if b > 0.2:
-        return "in-plane"
-    if b < 0.2 and mean_mz > 0.65:
-        return "out-of-plane"
-    if abs(Q) > 0.1:
-        return "vortex"
-    return "domain-wall"
-
-
-# ------------------------------------------------------------
-# Main preprocessing function
-# ------------------------------------------------------------
-
-def preprocess_simulation(zarr_path):
-    """
-    Reads one simulation's .zarr and returns:
-        field_200x200x3,
-        (Tx, Tz),
-        metadata_dict
+    Obsługa typowych przypadków:
+      (H,W,3)
+      (K,H,W,3)         -> bierzemy 0 lub meta["State"] gdy K małe (np. 2)
+      (T,H,W,3)         -> bierzemy ostatni t
+      (T,K,H,W,3)       -> ostatni t i wybrany K
+      (K,H,W) z dtype=(float,(3,)) albo structured -> konwersja do (K,H,W,3)
     """
 
-    job = Pyzfn(zarr_path)
-    store = zarr.open(zarr_path, mode="r")
+    a = np.asarray(m)
 
-    # magnetization field (t, nx, ny, nz, 3)
-    m = store["m_relaxed"][:]
+    # case: dtype ma wektor (3,) w dtype zamiast osi last
+    if a.ndim >= 2 and a.dtype.subdtype is not None:
+        base, shp = a.dtype.subdtype
+        if shp == (3,):
+            a = a.view(base).reshape(*a.shape, 3)
+        elif shp == (2,):  # spotykane przy 2 warstwach / 2 komponentach -> dopaduj
+            tmp = a.view(base).reshape(*a.shape, 2)
+            z = np.zeros((*tmp.shape[:-1], 1), dtype=tmp.dtype)
+            a = np.concatenate([tmp, z], axis=-1)
 
-    # 1) Resample to target resolution
-    field = resample_field_to_200(m, job)    # (200,200,3)
+    # case: structured dtype (np. pola x,y,z)
+    if a.dtype.fields is not None:
+        names = list(a.dtype.names)
+        if len(names) >= 3:
+            a = np.stack([a[names[0]], a[names[1]], a[names[2]]], axis=-1).astype(np.float32)
 
-    # 2) Extract magnetization components
-    mx = field[:,:,0]
-    my = field[:,:,1]
-    mz = np.abs(field[:,:,2])
+    if a.ndim == 3 and a.shape[-1] == 3:
+        return a.astype(np.float32)
 
-    # 3) Compute physics features
-    mean_mx = float(np.mean(mx))
-    mean_my = float(np.mean(my))
-    mean_mz = float(np.mean(mz))
-    b = float(np.sqrt(mean_mx**2 + mean_my**2))
+    if a.ndim == 4 and a.shape[-1] == 3:
+        # (K,H,W,3) albo (T,H,W,3)
+        if a.shape[0] <= 4:  # raczej "state"/warstwa
+            s = _pick_state_idx(meta, a.shape[0], default=0)
+            a = a[s]
+        else:                # raczej czas
+            a = a[-1]
+        return a.astype(np.float32)
 
-    Q = compute_topological_charge(mx, my, mz)
+    if a.ndim == 5 and a.shape[-1] == 3:
+        # (T,K,H,W,3) lub (1,K,H,W,3)
+        if a.shape[1] <= 4:
+            s = _pick_state_idx(meta, a.shape[1], default=0)
+            a = a[-1, s]
+        else:
+            a = a[-1, 0]
+        return a.astype(np.float32)
 
-    # 4) Classify texture
-    state = classify_state(mx, my, mz, b, Q)
+    # fallback: (3,H,W)
+    if a.ndim == 3 and a.shape[0] == 3:
+        return np.transpose(a, (1, 2, 0)).astype(np.float32)
 
-    # 5) Extract parameters
-    Tx = float(job.Tx)
-    Tz = float(job.Tz)
+    raise ValueError(f"Nieobsługiwany kształt m_relaxed: {a.shape}, dtype={a.dtype}")
 
-    print("Raw field shape:", m.shape)
-    print("Single t-step shape:", m[0].shape)
 
-    metadata = {
-        "Q": Q,
-        "b": b,
-        "MeanMx": mean_mx,
-        "MeanMy": mean_my,
-        "MeanMz": mean_mz,
-        "State": state,
-        "Aex": float(job.Aex),
-        "Msat": float(job.Msat)
-    }
+def _read_table_last_safe(g: zarr.hierarchy.Group) -> dict:
+    """
+    Bezpiecznie: jeśli kolumna ma wektor na końcu (np. (2,)), nie próbujemy
+    robić z tego float na siłę – zapisujemy listę albo pomijamy.
+    """
+    out = {}
+    if "table" not in g:
+        return out
+    tg = g["table"]
 
-    return field, (Tx, Tz), metadata
+    def _last_any(name: str):
+        if name not in tg:
+            return None
+        try:
+            arr = np.asarray(tg[name][...])
+            flat = np.ravel(arr)
+            if flat.size == 0:
+                return None
+            v = flat[-1]
+            # jeśli to wektor/array -> zwróć listę
+            if isinstance(v, (np.ndarray, list, tuple)):
+                vv = np.asarray(v).tolist()
+                return vv
+            # jeśli to scalar numpy
+            if hasattr(v, "item"):
+                return v.item()
+            return v
+        except Exception:
+            return None
+
+    for k in ["ext_topologicalcharge", "mx", "my", "mz", "t", "step"]:
+        v = _last_any(k)
+        if v is not None:
+            out[f"{k}_last"] = v
+    return out
+
+
+def preprocess_simulation(
+    zarr_path: str,
+    target_size=(200, 200),
+    verbose: bool = False,
+    abs_mz: bool = False,
+) -> Tuple[np.ndarray, Tuple[float, float], Dict[str, Any]]:
+    g = zarr.open_group(zarr_path, mode="r")
+
+    if "m_relaxed" not in g:
+        raise KeyError(f"Brak 'm_relaxed' w {zarr_path}. Dostępne: {list(g.array_keys())}")
+
+    meta = dict(getattr(g, "attrs", {}))
+    meta.update(_read_table_last_safe(g))
+    meta["source_path"] = str(zarr_path)
+
+    m = np.asarray(g["m_relaxed"][...])
+    field_hw3 = _to_hw3(m, meta)
+
+    if abs_mz:
+        field_hw3[..., 2] = np.abs(field_hw3[..., 2])
+
+    field_hw3 = _resize_hw3(field_hw3, target_size=target_size)
+
+    Tx, Tz = _parse_Tx_Tz_from_path(zarr_path)
+    if verbose:
+        print(f"[PRE] {os.path.basename(zarr_path)} raw={m.shape} -> {field_hw3.shape} | Tx={Tx} Tz={Tz}")
+    return field_hw3, (Tx, Tz), meta
