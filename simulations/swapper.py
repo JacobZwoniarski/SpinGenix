@@ -8,10 +8,17 @@ import re
 import zarr
 import logging
 import shutil
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, List, Union, Tuple, Any
 import time
 
 from rich.logging import RichHandler
+
+try:
+    from .template_manager import TemplateManager
+    from .parameter_validator import ParameterValidator
+except ImportError:
+    from template_manager import TemplateManager
+    from parameter_validator import ParameterValidator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,17 +41,57 @@ class SimulationManager:
     def __init__(
         self,
         main_path: str,
-        destination_path: str,
         prefix: str,
-        template_path: str = "/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/template.mx3",
+        template_manager: Optional[TemplateManager] = None,
+        template_path: Optional[str] = None,
+        validator: Optional[ParameterValidator] = None,
         sbatch_cmd: Optional[str] = None,
         amumax_cmd: str = "/mnt/storage_3/home/jakzwo/pl0095-01/scratch/bin/amumax",
+        destination_path: Optional[str] = None,  # Deprecated, kept for backward compatibility
     ) -> None:
         self.main_path = main_path
-        self.destination_path = destination_path
         self.prefix = prefix
-        self.template_path = template_path
         self.amumax_cmd = amumax_cmd
+        
+        # Template manager setup
+        if template_manager is not None:
+            self.template_manager = template_manager
+        elif template_path is not None:
+            self.template_manager = TemplateManager(template_path)
+        else:
+            # Default fallback
+            default_template = "/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/template.mx3"
+            if os.path.exists(default_template):
+                self.template_manager = TemplateManager(default_template)
+            else:
+                # Try relative path
+                relative_template = os.path.join(
+                    os.path.dirname(__file__), "template.mx3"
+                )
+                if os.path.exists(relative_template):
+                    self.template_manager = TemplateManager(relative_template)
+                else:
+                    log.warning(
+                        "No template provided and default not found. "
+                        "Template manager will be unavailable."
+                    )
+                    self.template_manager = None
+        
+        # Parameter validator (optional)
+        self.validator = validator
+        
+        # Backward compatibility: keep template_path attribute
+        self.template_path = (
+            self.template_manager.template_path if self.template_manager else None
+        )
+        
+        # Deprecated parameter warning
+        if destination_path is not None:
+            log.warning(
+                "Parameter 'destination_path' is deprecated and not used. "
+                "It will be removed in future versions."
+            )
+        self.destination_path = destination_path
 
         # sbatch: PATH albo typowe lokalizacje
         self.sbatch_cmd = (
@@ -138,8 +185,444 @@ class SimulationManager:
         return content
 
     def raw_code(self, **kwargs: Dict[str, Union[str, float, int]]) -> str:
-        """Generate raw mx3 code from template_path."""
-        return SimulationManager.replace_variables_in_template(self.template_path, kwargs)
+        """
+        Generate raw mx3 code from template_path.
+        
+        Uses TemplateManager if available, falls back to legacy method.
+        """
+        if self.template_manager is not None:
+            return self.template_manager.render(**kwargs)
+        elif self.template_path is not None:
+            return SimulationManager.replace_variables_in_template(self.template_path, kwargs)
+        else:
+            raise RuntimeError(
+                "No template available. Please provide template_manager or template_path."
+            )
+    
+    def _fmt(self, x: Union[float, int]) -> str:
+        """Format numeric value for use in file paths."""
+        return format(float(x), ".5g")
+    
+    def _construct_paths(self, **params) -> Dict[str, str]:
+        """
+        Construct all file paths for a simulation.
+        
+        Args:
+            **params: Must contain 'prefix', 'last_param_name', and parameter values
+            
+        Returns:
+            Dictionary with keys: base_dir, sim_name, mx3_file, zarr_path,
+            sbatch_file, lock_file, done_file, interrupted_file
+        """
+        prefix = params.get('prefix', self.prefix)
+        last_param_name = params['last_param_name']
+        last_val = params[last_param_name]
+        
+        val_sep = "_"
+        base_dir = f"{self.main_path}{prefix}/"
+        
+        # Build path from parameters (excluding last parameter and meta parameters)
+        for key, val in params.items():
+            if key not in [last_param_name, 'i', 'prefix', 'last_param_name']:
+                base_dir += f"{key}{val_sep}{self._fmt(val)}/"
+        
+        sim_name = f"{last_param_name}{val_sep}{self._fmt(last_val)}"
+        
+        return {
+            'base_dir': base_dir,
+            'sim_name': sim_name,
+            'mx3_file': os.path.join(base_dir, f"{sim_name}.mx3"),
+            'zarr_path': os.path.join(base_dir, f"{sim_name}.zarr"),
+            'sbatch_file': os.path.join(self.main_path, prefix, "sbatch", f"{sim_name}.sb"),
+            'lock_file': os.path.join(base_dir, f"{sim_name}.mx3_status.lock"),
+            'done_file': os.path.join(base_dir, f"{sim_name}.mx3_status.done"),
+            'interrupted_file': os.path.join(base_dir, f"{sim_name}.mx3_status.interrupted"),
+        }
+    
+    def _check_simulation_status(self, paths: Dict[str, str]) -> Tuple[str, bool]:
+        """
+        Check simulation status based on status files and zarr completeness.
+        
+        Args:
+            paths: Dictionary from _construct_paths()
+            
+        Returns:
+            Tuple of (status_string, restart_required)
+            
+        Status strings:
+            - "locked": Simulation currently running
+            - "finished": Done file exists and zarr complete
+            - "finished_incomplete": Done file exists but zarr incomplete
+            - "interrupted": Interrupted file exists
+            - "new": No files exist yet
+            - "no_status_complete": No done file but zarr is complete
+            - "no_status_incomplete": No done file and zarr incomplete
+        """
+        lock_exists = os.path.exists(paths['lock_file'])
+        done_exists = os.path.exists(paths['done_file'])
+        interrupted_exists = os.path.exists(paths['interrupted_file'])
+        zarr_exists = os.path.exists(paths['zarr_path'])
+        
+        if lock_exists:
+            return "locked", False
+        
+        if interrupted_exists:
+            # Clean up interrupted file
+            try:
+                os.remove(paths['interrupted_file'])
+            except Exception:
+                pass
+            return "interrupted", True
+        
+        if done_exists:
+            ok, cnt = self.check_simulation_completion(paths['zarr_path'])
+            if ok:
+                return "finished", False
+            else:
+                return "finished_incomplete", True
+        
+        if zarr_exists:
+            ok, cnt = self.check_simulation_completion(paths['zarr_path'])
+            if ok:
+                return "no_status_complete", False
+            else:
+                return "no_status_incomplete", True
+        
+        return "new", True
+    
+    def _write_mx3_file(self, file_path: str, content: str) -> None:
+        """
+        Write MuMax3 simulation file.
+        
+        Args:
+            file_path: Path to .mx3 file
+            content: MuMax3 code content
+        """
+        self.create_path_if_not_exists(file_path)
+        
+        # Write to temporary file first, then rename (atomic operation)
+        temp_path = file_path + ".tmp"
+        with open(temp_path, 'w') as f:
+            f.write(content)
+        os.rename(temp_path, file_path)
+    
+    def _write_sbatch_script(self, file_path: str, content: str) -> None:
+        """
+        Write SLURM sbatch script.
+        
+        Args:
+            file_path: Path to .sb file
+            content: Sbatch script content
+        """
+        self.create_path_if_not_exists(file_path)
+        with open(file_path, 'w') as f:
+            f.write(content)
+    
+    def _submit_to_slurm(self, sbatch_path: str, max_retries: int = 3) -> Dict[str, Any]:
+        """
+        Submit job to SLURM with retry mechanism.
+        
+        Args:
+            sbatch_path: Path to sbatch script
+            max_retries: Maximum number of retry attempts
+            
+        Returns:
+            Dictionary with keys:
+                - success: bool
+                - job_id: str or None
+                - stdout: str
+                - stderr: str
+        """
+        if self.sbatch_cmd is None:
+            return {
+                'success': False,
+                'job_id': None,
+                'stdout': '',
+                'stderr': 'sbatch command not available'
+            }
+        
+        for attempt in range(max_retries):
+            try:
+                result = subprocess.run(
+                    [self.sbatch_cmd, sbatch_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0:
+                    # Extract job_id from output: "Submitted batch job 12345"
+                    match = re.search(r'Submitted batch job (\d+)', result.stdout)
+                    job_id = match.group(1) if match else None
+                    
+                    return {
+                        'success': True,
+                        'job_id': job_id,
+                        'stdout': result.stdout,
+                        'stderr': result.stderr
+                    }
+                else:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt  # Exponential backoff
+                        log.warning(
+                            f"sbatch failed (attempt {attempt + 1}/{max_retries}), "
+                            f"retrying in {wait_time}s..."
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        return {
+                            'success': False,
+                            'job_id': None,
+                            'stdout': result.stdout,
+                            'stderr': result.stderr
+                        }
+            except subprocess.TimeoutExpired:
+                if attempt < max_retries - 1:
+                    log.warning(
+                        f"sbatch timeout (attempt {attempt + 1}/{max_retries}), retrying..."
+                    )
+                    continue
+                else:
+                    return {
+                        'success': False,
+                        'job_id': None,
+                        'stdout': '',
+                        'stderr': 'Timeout expired'
+                    }
+            except Exception as e:
+                return {
+                    'success': False,
+                    'job_id': None,
+                    'stdout': '',
+                    'stderr': str(e)
+                }
+        
+        # Should not reach here, but just in case
+        return {
+            'success': False,
+            'job_id': None,
+            'stdout': '',
+            'stderr': 'Max retries exceeded'
+        }
+    
+    def submit_single(
+        self,
+        params: Dict[str, Any],
+        force: bool = False,
+        sbatch: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Submit a single simulation (new refactored method).
+        
+        Args:
+            params: Parameter dictionary (must contain 'last_param_name' and parameter values)
+            force: If True, ignore status and always submit
+            sbatch: If True, submit to SLURM; if False, only prepare files
+            
+        Returns:
+            Dictionary with:
+                - status: 'submitted' | 'skipped' | 'error'
+                - message: Description of what happened
+                - paths: Dictionary of file paths
+                - job_id: SLURM job ID (if submitted)
+        """
+        # Validate parameters if validator is available
+        if self.validator is not None:
+            is_valid, errors = self.validator.validate(params)
+            if not is_valid:
+                return {
+                    'status': 'error',
+                    'message': f"Parameter validation failed: {'; '.join(errors)}",
+                    'paths': None,
+                    'job_id': None
+                }
+        
+        # Construct paths
+        try:
+            paths = self._construct_paths(**params)
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f"Failed to construct paths: {e}",
+                'paths': None,
+                'job_id': None
+            }
+        
+        # Check status
+        status, restart_required = self._check_simulation_status(paths)
+        
+        if not restart_required and not force:
+            return {
+                'status': 'skipped',
+                'message': f"Simulation already {status}",
+                'paths': paths,
+                'job_id': None
+            }
+        
+        # Generate mx3 code
+        try:
+            mx3_code = self.raw_code(**params)
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f"Template rendering failed: {e}",
+                'paths': paths,
+                'job_id': None
+            }
+        
+        # Write mx3 file
+        try:
+            self._write_mx3_file(paths['mx3_file'], mx3_code)
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f"Failed to write mx3 file: {e}",
+                'paths': paths,
+                'job_id': None
+            }
+        
+        # If sbatch is disabled, stop here
+        if not sbatch:
+            return {
+                'status': 'prepared',
+                'message': 'Files prepared but not submitted (sbatch=False)',
+                'paths': paths,
+                'job_id': None
+            }
+        
+        # Generate and write sbatch script
+        try:
+            sbatch_content = self.gen_sbatch_script(
+                paths['sim_name'],
+                os.path.join(paths['base_dir'], paths['sim_name'])
+            )
+            self._write_sbatch_script(paths['sbatch_file'], sbatch_content)
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f"Failed to write sbatch script: {e}",
+                'paths': paths,
+                'job_id': None
+            }
+        
+        # Submit to SLURM
+        if self.sbatch_cmd is None:
+            return {
+                'status': 'error',
+                'message': 'sbatch command not available',
+                'paths': paths,
+                'job_id': None
+            }
+        
+        try:
+            result = self._submit_to_slurm(paths['sbatch_file'])
+            if result['success']:
+                return {
+                    'status': 'submitted',
+                    'message': f"Submitted successfully, job_id={result.get('job_id')}",
+                    'paths': paths,
+                    'job_id': result.get('job_id')
+                }
+            else:
+                return {
+                    'status': 'error',
+                    'message': f"Submission failed: {result['stderr']}",
+                    'paths': paths,
+                    'job_id': None
+                }
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f"Submission exception: {e}",
+                'paths': paths,
+                'job_id': None
+            }
+    
+    def submit_batch(
+        self,
+        params: Dict[str, List],
+        last_param_name: str,
+        pairs: bool = False,
+        force: bool = False,
+        sbatch: bool = True,
+        minsim: int = 0,
+        maxsim: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Submit multiple simulations (new refactored method).
+        
+        Args:
+            params: Dictionary mapping parameter names to lists of values
+                    Example: {'Tx': [10e-9, 20e-9], 'Tz': [15e-9, 25e-9]}
+            last_param_name: Name of the last parameter (used for file naming)
+            pairs: If True, use zip (pairs); if False, use cartesian product
+            force: If True, ignore status and resubmit all
+            sbatch: If True, submit to SLURM
+            minsim: Start index for simulations
+            maxsim: End index for simulations (None = all)
+            
+        Returns:
+            List of result dictionaries from submit_single()
+        """
+        param_names = list(params.keys())
+        
+        # Choose iteration strategy
+        if pairs:
+            param_lengths = [len(params[name]) for name in param_names]
+            if len(set(param_lengths)) != 1:
+                raise ValueError(
+                    f"pairs=True requires same length arrays. "
+                    f"Found lengths: {dict(zip(param_names, param_lengths))}"
+                )
+            value_sets = list(zip(*[params[name] for name in param_names]))
+        else:
+            value_sets = list(itertools.product(*params.values()))
+        
+        results = []
+        
+        for i, values in enumerate(value_sets):
+            if i < minsim:
+                continue
+            if maxsim is not None and i >= maxsim:
+                break
+            
+            # Build parameter dict for this simulation
+            sim_params = {
+                'prefix': self.prefix,
+                'i': i,
+                'last_param_name': last_param_name
+            }
+            
+            for name, value in zip(param_names, values):
+                sim_params[name] = float(value) if isinstance(value, (int, float, np.floating)) else value
+            
+            # Submit single simulation
+            result = self.submit_single(sim_params, force=force, sbatch=sbatch)
+            results.append(result)
+            
+            # Log progress
+            if (i + 1) % 10 == 0 or result['status'] == 'error':
+                log.info(
+                    f"[{i + 1}/{len(value_sets)}] {result['status']}: {result['message']}"
+                )
+            
+            # Small delay to avoid overwhelming the scheduler
+            if sbatch and result['status'] == 'submitted':
+                time.sleep(1)
+        
+        # Summary
+        submitted = sum(1 for r in results if r['status'] == 'submitted')
+        skipped = sum(1 for r in results if r['status'] == 'skipped')
+        errors = sum(1 for r in results if r['status'] == 'error')
+        prepared = sum(1 for r in results if r['status'] == 'prepared')
+        
+        log.info(
+            f"Batch complete: {submitted} submitted, {skipped} skipped, "
+            f"{errors} errors, {prepared} prepared"
+        )
+        
+        return results
 
     def gen_sbatch_script(self, name: str, path: str) -> str:
         """Generate an sbatch script for submitting jobs."""
@@ -341,40 +824,30 @@ fi
         pairs: bool = False
     ) -> None:
         """
+        DEPRECATED: Use submit_batch() instead.
+        
+        Legacy method for backward compatibility.
         If pairs=False -> Cartesian product.
         If pairs=True  -> zip(param1[i], param2[i], ...)
         """
-        param_names = list(params.keys())
-
-        if pairs:
-            param_lengths = [len(params[name]) for name in param_names]
-            if len(set(param_lengths)) != 1:
-                raise ValueError(
-                    "pairs=True requires same length arrays. "
-                    f"Found lengths: {dict(zip(param_names, param_lengths))}"
-                )
-            value_sets = zip(*[params[name] for name in param_names])
-        else:
-            value_sets = itertools.product(*params.values())
-
-        for i, values in enumerate(value_sets):
-            if i < minsim:
-                continue
-            if maxsim is not None and i >= maxsim:
-                break
-
-            kwargs: Dict[str, Union[str, float, int]] = {"prefix": self.prefix, "i": i}
-            for name, value in zip(param_names, values):
-                kwargs[name] = float(value) if isinstance(value, (int, float, np.floating)) else value
-
-            time.sleep(1)
-
-            self.submit_python_code(
-                self.raw_code(**kwargs),
-                last_param_name=last_param_name,
-                sbatch=sbatch,
-                cleanup=cleanup,
-                check=check,
-                force=force,
-                **kwargs
-            )
+        import warnings
+        warnings.warn(
+            "submit_all_simulations() is deprecated and will be removed in a future version. "
+            "Use submit_batch() instead for better error handling and result tracking.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
+        # Delegate to new method
+        results = self.submit_batch(
+            params=params,
+            last_param_name=last_param_name,
+            pairs=pairs,
+            force=force,
+            sbatch=sbatch,
+            minsim=minsim,
+            maxsim=maxsim
+        )
+        
+        # For backward compatibility, don't return anything
+        return None

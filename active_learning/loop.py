@@ -100,11 +100,37 @@ class ActiveLearningLoop:
         self.param_cols = ["Tx_val", "Tz_val"]
         self.param_ranges = {"Tx_val": self.Tx_range, "Tz_val": self.Tz_range}
 
+        # Setup template manager
+        if not hasattr(self, 'template_path') or self.template_path is None:
+            # Default: relative to this file
+            self.template_path = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "simulations", "template.mx3"
+            )
+        
+        # Create TemplateManager
+        try:
+            from simulations.template_manager import TemplateManager
+            from simulations.parameter_validator import ParameterValidator
+        except ImportError:
+            from ..simulations.template_manager import TemplateManager  # type: ignore
+            from ..simulations.parameter_validator import ParameterValidator  # type: ignore
+        
+        self.template_manager = TemplateManager(self.template_path)
+        
+        # Setup parameter validator
+        validator_rules = {
+            'Tx': {'min': self.Tx_range[0], 'max': self.Tx_range[1], 'type': float, 'required': True},
+            'Tz': {'min': self.Tz_range[0], 'max': self.Tz_range[1], 'type': float, 'required': True},
+        }
+        self.validator = ParameterValidator(validator_rules)
+
         # Simulation manager (Swapper)
         self.sim_manager = SimulationManager(
             main_path=self.simulations_dir,
-            destination_path=self.simulations_dir,
             prefix=self.sim_prefix,
+            template_manager=self.template_manager,
+            validator=self.validator,
         )
 
         # foldery wyników
@@ -333,12 +359,30 @@ class ActiveLearningLoop:
 
             print("[AL] Submitting new simulations via sbatch...")
             params = {"Tx": new_Tx, "Tz": new_Tz}
-            self.sim_manager.submit_all_simulations(
+            
+            # Use new submit_batch method
+            results = self.sim_manager.submit_batch(
                 params=params,
                 last_param_name="Tz",
                 pairs=True,
                 sbatch=True,
             )
+            
+            # Analyze results
+            submitted = [r for r in results if r['status'] == 'submitted']
+            skipped = [r for r in results if r['status'] == 'skipped']
+            errors = [r for r in results if r['status'] == 'error']
+            
+            print(f"[AL] Submission summary: {len(submitted)} submitted, {len(skipped)} skipped, {len(errors)} errors")
+            
+            if errors:
+                print(f"[AL] WARNING: {len(errors)} simulations failed to submit:")
+                for err in errors[:5]:  # Show first 5 errors
+                    print(f"[AL]   - {err['message']}")
+                
+                if len(errors) == len(results):
+                    print("[AL] ERROR: All submissions failed. Stopping iteration.")
+                    break
 
             # 8) Wait + preprocess + add
             requested_pairs = list(zip(new_Tx, new_Tz))

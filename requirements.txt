@@ -7,3 +7,5 @@ h5py
 tables
 seaborn
 discretisedfield
+zarr
+rich

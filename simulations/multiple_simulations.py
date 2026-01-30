@@ -84,19 +84,20 @@ if __name__ == "__main__":
     print("Liczba początkowych punktów:", len(params["Tx"]))
 
     # # Inicjalizacja managera symulacji
+    # Note: destination_path is deprecated and will be removed
     manager = SimulationManager(
         main_path="/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/",
-        destination_path="/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/",
         prefix="vx5",
     )
     #print(params)
-    # Uruchomienie początkowych symulacji
+    # Uruchomienie początkowych symulacji (submit_all_simulations still works but deprecated)
+    # Use submit_batch for new code
     manager.submit_all_simulations(
         params=params,
         last_param_name="Tz",
         minsim=0,
         maxsim=None,
-        sbatch=1,
+        sbatch=True,
         pairs=True
     )
 
