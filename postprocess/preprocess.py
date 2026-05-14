@@ -220,6 +220,7 @@ def preprocess_simulation(zarr_path, target_size=(200, 200), verbose=False):
 
     # 5) Extract parameters
     Tx = _as_float(_get_attr(job, store, "Tx"), _param_from_path(zarr_path, "Tx"))
+    Ty = _as_float(_get_attr(job, store, "Ty"), Tx)
     Tz = _as_float(_get_attr(job, store, "Tz"), _param_from_path(zarr_path, "Tz"))
 
     if Tx is None or Tz is None:
@@ -241,6 +242,16 @@ def preprocess_simulation(zarr_path, target_size=(200, 200), verbose=False):
         "State": state,
         "Aex": _as_float(_get_attr(job, store, "Aex")),
         "Msat": _as_float(_get_attr(job, store, "Msat")),
+        "Ty_val": Ty,
+        "Nx": _as_int(_get_attr(job, store, "Nx")),
+        "Ny": _as_int(_get_attr(job, store, "Ny")),
+        "Nz": _as_int(_get_attr(job, store, "Nz")),
+        "dx": _as_float(_get_attr(job, store, "dx")),
+        "dy": _as_float(_get_attr(job, store, "dy")),
+        "dz": _as_float(_get_attr(job, store, "dz")),
+        "target_Nx": int(target_size[0]),
+        "target_Ny": int(target_size[1]),
+        "target_Nz": 1,
         "source_path": os.path.abspath(zarr_path),
     }
 

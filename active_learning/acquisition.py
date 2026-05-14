@@ -1,5 +1,7 @@
 import numpy as np
 
+from .registry import PARAM_COLUMNS_V1, compute_param_hash
+
 
 def _is_too_close(point, points, min_distance):
     if points is None or min_distance <= 0:
@@ -11,7 +13,16 @@ def _is_too_close(point, points, min_distance):
     return False
 
 
-def select_top_k(U, Tx_grid, Tz_grid, K=10, min_distance=0.0, existing_points=None):
+def select_top_k(
+    U,
+    Tx_grid,
+    Tz_grid,
+    K=10,
+    min_distance=0.0,
+    existing_points=None,
+    excluded_hashes=None,
+    param_columns=PARAM_COLUMNS_V1,
+):
     """
     Selects top K parameter points with highest uncertainty.
     Returns:
@@ -25,6 +36,7 @@ def select_top_k(U, Tx_grid, Tz_grid, K=10, min_distance=0.0, existing_points=No
     new_Tz = []
 
     used_points = []
+    excluded_hashes = excluded_hashes or set()
 
     for idx in flat_indices:
         if len(new_Tx) >= K:
@@ -37,8 +49,14 @@ def select_top_k(U, Tx_grid, Tz_grid, K=10, min_distance=0.0, existing_points=No
         Tz = Tz_grid[j]
 
         point = [Tx, Tz]
+        point_hash = compute_param_hash(
+            {"Tx_val": Tx, "Tz_val": Tz},
+            param_names=param_columns,
+        )
 
         # optional: enforce distance from selected and already simulated points
+        if point_hash in excluded_hashes:
+            continue
         if _is_too_close(point, used_points, min_distance):
             continue
         if _is_too_close(point, existing_points, min_distance):

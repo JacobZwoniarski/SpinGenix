@@ -9,6 +9,12 @@ from .trainer import train_cvae
 from .model import UNetCVAE
 from .uncertainty import compute_uncertainty_map
 from .acquisition import select_top_k
+from .registry import (
+    PARAM_COLUMNS_V1,
+    make_registry_row,
+    registry_points_and_hashes,
+    upsert_registry,
+)
 
 # visualization + phase diagram
 from .visualization import visualize_reconstruction
@@ -32,6 +38,7 @@ class ActiveLearningLoop:
         raw_dir="data/raw/",
         processed_dir="data/processed/",
         results_dir="results/",
+        registry_path="data/registry",
         simulations_dir="/mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/",
         # AL PARAMS
         Tx_range=(10e-9, 100e-9),
@@ -45,7 +52,8 @@ class ActiveLearningLoop:
         epochs=20,
         batch_size=8,
         lr=1e-4,
-        device="cuda"
+        device="cuda",
+        param_columns=PARAM_COLUMNS_V1,
     ):
         self.meta_path = meta_path
         self.fields_path = fields_path
@@ -53,7 +61,9 @@ class ActiveLearningLoop:
         self.raw_dir = raw_dir
         self.processed_dir = processed_dir
         self.results_dir = results_dir
+        self.registry_path = registry_path
         self.simulations_dir = simulations_dir
+        self.param_columns = tuple(param_columns)
 
         # AL settings
         self.Tx_range = Tx_range
@@ -113,6 +123,42 @@ class ActiveLearningLoop:
             print(f"[AL] {len(ready)}/{len(expected_paths)} ready... "
                   f"sleeping {self.poll_interval} seconds.")
             time.sleep(self.poll_interval)
+
+    def load_registry_exclusions(self):
+        if not self.registry_path:
+            return None, set()
+
+        points, hashes = registry_points_and_hashes(
+            self.registry_path,
+            param_columns=self.param_columns,
+        )
+        if points is not None:
+            print(f"[AL] Registry exclusions: {len(points)} points, {len(hashes)} hashes.")
+        return points, hashes
+
+    def upsert_registry_rows(self, rows):
+        if not self.registry_path or not rows:
+            return
+        _, paths = upsert_registry(rows, registry_dir=self.registry_path)
+        print(f"[AL] Registry updated: {paths['csv']}")
+
+    def registry_rows_for_points(self, tx_values, tz_values, zarr_paths, status, iteration, field_keys=None):
+        rows = []
+        field_keys = field_keys or [None] * len(zarr_paths)
+        for Tx, Tz, zarr_path, field_key in zip(tx_values, tz_values, zarr_paths, field_keys):
+            rows.append(make_registry_row(
+                params={"Tx_val": Tx, "Tz_val": Tz},
+                prefix=self.sim_manager.prefix,
+                split="train",
+                source="active_learning",
+                status=status,
+                iteration=iteration,
+                param_names=self.param_columns,
+                zarr_path=zarr_path,
+                field_path=self.fields_path if status == "done" else None,
+                field_key=field_key,
+            ))
+        return rows
 
     # ---------------------------------------------------------------
     # Save visualizations
@@ -242,6 +288,9 @@ class ActiveLearningLoop:
                 min_distance = self.acquisition_min_distance
 
             existing_points = dataset.df[["Tx_val", "Tz_val"]].to_numpy(dtype=float)
+            registry_points, registry_hashes = self.load_registry_exclusions()
+            if registry_points is not None and len(registry_points):
+                existing_points = np.vstack([existing_points, registry_points])
             new_Tx, new_Tz = select_top_k(
                 U,
                 Tx_grid,
@@ -249,19 +298,13 @@ class ActiveLearningLoop:
                 K=self.k_new,
                 min_distance=min_distance,
                 existing_points=existing_points,
+                excluded_hashes=registry_hashes,
+                param_columns=self.param_columns,
             )
             print(f"[AL] Selected {len(new_Tx)} new points for iteration {it+1}.")
 
             # 5. Submit simulations
             params = {"Tx": new_Tx, "Tz": new_Tz}
-
-            print("[AL] Submitting new simulations to HPC...")
-            self.sim_manager.submit_all_simulations(
-                params,
-                last_param_name="Tz",
-                pairs=True,
-                sbatch=True
-            )
 
             expected_paths = [
                 os.path.join(
@@ -273,16 +316,72 @@ class ActiveLearningLoop:
                 for Tx, Tz in zip(new_Tx, new_Tz)
             ]
 
+            print("[AL] Submitting new simulations to HPC...")
+            self.sim_manager.submit_all_simulations(
+                params,
+                last_param_name="Tz",
+                pairs=True,
+                sbatch=True
+            )
+            self.upsert_registry_rows(self.registry_rows_for_points(
+                new_Tx,
+                new_Tz,
+                expected_paths,
+                status="submitted",
+                iteration=it + 1,
+            ))
+
             # 6. Wait
-            self.wait_for_simulations(expected_paths)
+            if not self.wait_for_simulations(expected_paths):
+                raise TimeoutError("Timed out waiting for active-learning simulations.")
 
             # 7. Preprocess results
             print("[AL] Preprocessing new results...")
+            done_registry_rows = []
             for zarr_path in expected_paths:
                 field, (Tx, Tz), metadata = preprocess_simulation(zarr_path)
-                dataset.add_sample(field, Tx, Tz, metadata)
+                field_key = str(len(dataset.df))
+                registry_row = make_registry_row(
+                    params={"Tx_val": Tx, "Tz_val": Tz},
+                    prefix=self.sim_manager.prefix,
+                    split="train",
+                    source="active_learning",
+                    status="done",
+                    iteration=it + 1,
+                    param_names=self.param_columns,
+                    zarr_path=zarr_path,
+                    field_path=self.fields_path,
+                    field_key=field_key,
+                    extra={
+                        key: metadata[key]
+                        for key in [
+                            "Ty_val",
+                            "Aex",
+                            "Msat",
+                            "Nx",
+                            "Ny",
+                            "Nz",
+                            "dx",
+                            "dy",
+                            "dz",
+                            "target_Nx",
+                            "target_Ny",
+                            "target_Nz",
+                        ]
+                        if key in metadata and metadata[key] is not None
+                    },
+                )
+                dataset.add_sample(field, Tx, Tz, {
+                    **metadata,
+                    "simulation_id": registry_row["simulation_id"],
+                    "param_hash": registry_row["param_hash"],
+                    "split": "train",
+                    "field_key": field_key,
+                })
+                done_registry_rows.append(registry_row)
 
             dataset.save(self.meta_path, self.fields_path)
+            self.upsert_registry_rows(done_registry_rows)
             print("[AL] Dataset updated.")
 
         print("\n[AL] Active Learning completed successfully.")
