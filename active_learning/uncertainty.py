@@ -21,7 +21,16 @@ def mc_dropout_forward(model, fields, cond, mc_samples=10):
 
 
 @torch.no_grad()
-def compute_uncertainty_point(model, Tx, Tz, device="cuda", mc_samples=10, H=200, W=200):
+def compute_uncertainty_point(
+    model,
+    Tx,
+    Tz,
+    device="cuda",
+    mc_samples=10,
+    H=200,
+    W=200,
+    param_normalizer=None,
+):
     """
     Computes uncertainty for a SINGLE (Tx, Tz) parameter point.
 
@@ -32,7 +41,10 @@ def compute_uncertainty_point(model, Tx, Tz, device="cuda", mc_samples=10, H=200
     # Create dummy zero-field input (model ignores input content thanks to conditioning)
     dummy = torch.zeros((1, 3, H, W), device=device)
 
-    cond = torch.tensor([[Tx, Tz]], dtype=torch.float32, device=device)
+    cond_values = np.array([Tx, Tz], dtype=np.float64)
+    if param_normalizer is not None:
+        cond_values = param_normalizer.transform(cond_values)
+    cond = torch.tensor([cond_values], dtype=torch.float32, device=device)
 
     preds = mc_dropout_forward(model, dummy, cond, mc_samples=mc_samples)
 
@@ -47,7 +59,14 @@ def compute_uncertainty_point(model, Tx, Tz, device="cuda", mc_samples=10, H=200
 
 
 @torch.no_grad()
-def compute_uncertainty_map(model, Tx_grid, Tz_grid, mc_samples=10, device="cuda"):
+def compute_uncertainty_map(
+    model,
+    Tx_grid,
+    Tz_grid,
+    mc_samples=10,
+    device="cuda",
+    param_normalizer=None,
+):
     """
     Computes uncertainty over a 2D grid of parameters.
 
@@ -74,7 +93,8 @@ def compute_uncertainty_map(model, Tx_grid, Tz_grid, mc_samples=10, device="cuda
                 device=device,
                 mc_samples=mc_samples,
                 H=H,
-                W=W
+                W=W,
+                param_normalizer=param_normalizer,
             )
 
     return U

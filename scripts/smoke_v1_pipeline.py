@@ -36,11 +36,16 @@ REQUIRED_MODULES = [
     "h5py",
     "tables",
     "zarr",
+    "pyarrow",
     "pyzfn",
     "discretisedfield",
 ]
 
 REQUIRED_METADATA_COLUMNS = {
+    "simulation_id",
+    "param_hash",
+    "split",
+    "field_key",
     "Tx_val",
     "Tz_val",
     "MeanMz_signed",
@@ -51,6 +56,16 @@ REQUIRED_METADATA_COLUMNS = {
     "State",
     "Aex",
     "Msat",
+    "Ty_val",
+    "Nx",
+    "Ny",
+    "Nz",
+    "dx",
+    "dy",
+    "dz",
+    "target_Nx",
+    "target_Ny",
+    "target_Nz",
     "source_path",
 }
 
@@ -129,7 +144,16 @@ def save_dataset_phase_diagram(df, out_dir):
     print(f"[plot] saved {out_path}")
 
 
-def training_smoke(meta_path, fields_path, out_dir, device, epochs, batch_size, max_samples):
+def training_smoke(
+    meta_path,
+    fields_path,
+    normalizer_path,
+    out_dir,
+    device,
+    epochs,
+    batch_size,
+    max_samples,
+):
     import torch
     from torch.utils.data import Subset
 
@@ -146,12 +170,15 @@ def training_smoke(meta_path, fields_path, out_dir, device, epochs, batch_size, 
         meta_path=meta_path,
         fields_path=fields_path,
         target_size=(200, 200),
+        normalizer_path=normalizer_path,
     )
     subset_size = min(max_samples, len(dataset))
     smoke_dataset = Subset(dataset, list(range(subset_size)))
 
     model = UNetCVAE(spatial_size=200)
     field, params = smoke_dataset[0]
+    physical_params = dataset.physical_params(0)
+    print(f"[model] normalized params={params.numpy()}, physical params={physical_params}")
     model = model.to(device)
     with torch.no_grad():
         recon, mu, logvar = model(field.unsqueeze(0).to(device), params.unsqueeze(0).to(device))
@@ -175,6 +202,11 @@ def training_smoke(meta_path, fields_path, out_dir, device, epochs, batch_size, 
             "spatial_size": 200,
             "latent_dim": model.latent_dim,
             "cond_dim": model.cond_dim,
+            "param_normalizer": (
+                dataset.param_normalizer.to_dict()
+                if dataset.param_normalizer is not None
+                else None
+            ),
             "note": "V1 reconstruction baseline smoke checkpoint; not a validated surrogate.",
         },
         checkpoint_path,
@@ -183,7 +215,7 @@ def training_smoke(meta_path, fields_path, out_dir, device, epochs, batch_size, 
 
     with torch.no_grad():
         recon, _, _ = model(field.unsqueeze(0).to(device), params.unsqueeze(0).to(device))
-    tx, tz = params.cpu().numpy()
+    tx, tz = physical_params
     recon_path = Path(out_dir) / "reconstructions" / "recon_smoke_hsl.png"
     fig, _ = visualize_reconstruction(
         field.cpu().numpy(),
@@ -203,6 +235,7 @@ def main():
     parser.add_argument("--prefix", default="vx5")
     parser.add_argument("--meta-path", default="data/dataset/meta.h5")
     parser.add_argument("--fields-path", default="data/dataset/fields.npz")
+    parser.add_argument("--normalizer-path", default="data/dataset/param_normalizer.json")
     parser.add_argument("--out-dir", default="results")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--train-epochs", type=int, default=1)
@@ -236,6 +269,7 @@ def main():
         training_smoke(
             str(meta_path),
             str(fields_path),
+            args.normalizer_path,
             args.out_dir,
             args.device,
             args.train_epochs,

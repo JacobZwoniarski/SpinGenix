@@ -19,7 +19,7 @@ import matplotlib.colors as mcolors
 
 
 @torch.no_grad()
-def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda"):
+def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda", param_normalizer=None):
     """
     Generate MeanMz for all grid points using the CVAE decoder.
     Returns:
@@ -35,7 +35,10 @@ def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda"):
 
     for tx in Tx_grid:
         for tz in Tz_grid:
-            cond = torch.tensor([[tx, tz]], dtype=torch.float32, device=device)
+            cond_values = np.array([tx, tz], dtype=np.float64)
+            if param_normalizer is not None:
+                cond_values = param_normalizer.transform(cond_values)
+            cond = torch.tensor([cond_values], dtype=torch.float32, device=device)
             if hasattr(model, "sample"):
                 recon = model.sample(cond)
             else:

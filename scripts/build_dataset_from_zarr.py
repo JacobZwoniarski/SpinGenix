@@ -38,6 +38,7 @@ from active_learning.registry import (
     simulation_id,
     upsert_registry,
 )
+from active_learning.normalization import ParamNormalizer, default_normalizer_path
 
 REQUIRED_METADATA_COLUMNS = {
     "simulation_id",
@@ -312,6 +313,16 @@ def main():
         default=None,
         help="Physical parameter column used for param_hash. Repeat for N-D runs.",
     )
+    parser.add_argument(
+        "--normalizer-path",
+        default=None,
+        help="Where to write param_normalizer.json. Defaults to OUT_DIR/param_normalizer.json.",
+    )
+    parser.add_argument(
+        "--no-normalizer",
+        action="store_true",
+        help="Do not write a parameter normalizer JSON file.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -423,12 +434,22 @@ def main():
     meta_path = out_dir / "meta.h5"
     fields_path = out_dir / "fields.npz"
 
-    pd.DataFrame(metadata_rows).to_hdf(meta_path, key="data", mode="w", format="table")
+    metadata_df = pd.DataFrame(metadata_rows)
+    metadata_df.to_hdf(meta_path, key="data", mode="w", format="table")
     np.savez_compressed(fields_path, **fields)
 
     print(f"Saved metadata: {meta_path}")
     print(f"Saved fields:   {fields_path}")
     print(f"Samples:        {len(metadata_rows)}")
+
+    if not args.no_normalizer:
+        normalizer_path = (
+            Path(args.normalizer_path)
+            if args.normalizer_path
+            else default_normalizer_path(meta_path)
+        )
+        ParamNormalizer.fit_dataframe(metadata_df, param_columns).save(normalizer_path)
+        print(f"Normalizer:     {normalizer_path}")
 
     if not args.no_registry:
         _, registry_paths = upsert_registry(registry_rows, registry_dir=args.registry_dir)

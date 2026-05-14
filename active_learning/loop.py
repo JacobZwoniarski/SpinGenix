@@ -39,6 +39,7 @@ class ActiveLearningLoop:
         processed_dir="data/processed/",
         results_dir="results/",
         registry_path="data/registry",
+        normalizer_path=None,
         simulations_dir="/mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/",
         # AL PARAMS
         Tx_range=(10e-9, 100e-9),
@@ -62,6 +63,7 @@ class ActiveLearningLoop:
         self.processed_dir = processed_dir
         self.results_dir = results_dir
         self.registry_path = registry_path
+        self.normalizer_path = normalizer_path or os.path.join(dataset_dir, "param_normalizer.json")
         self.simulations_dir = simulations_dir
         self.param_columns = tuple(param_columns)
 
@@ -181,7 +183,7 @@ class ActiveLearningLoop:
 
             orig = field.cpu().numpy()
             pred = recon[0].cpu().numpy()
-            Tx, Tz = params.cpu().numpy()
+            Tx, Tz = dataset.physical_params(int(idx))
 
             # HSL mode
             fig, _ = visualize_reconstruction(orig, pred, Tx, Tz, mode="hsl")
@@ -216,7 +218,21 @@ class ActiveLearningLoop:
         os.makedirs(out_dir, exist_ok=True)
 
         Tx_grid, Tz_grid = self.generate_grid()
-        df = predict_phase_mz(model, Tx_grid, Tz_grid, device=self.device)
+        dataset = MagnetizationDataset(
+            meta_path=self.meta_path,
+            fields_path=self.fields_path,
+            device=self.device,
+            target_size=(200, 200),
+            param_columns=self.param_columns,
+            normalizer_path=self.normalizer_path,
+        )
+        df = predict_phase_mz(
+            model,
+            Tx_grid,
+            Tz_grid,
+            device=self.device,
+            param_normalizer=dataset.param_normalizer,
+        )
 
         fig, _ = plot_phase_diagram(
             df,
@@ -241,7 +257,9 @@ class ActiveLearningLoop:
                 meta_path=self.meta_path,
                 fields_path=self.fields_path,
                 device=self.device,
-                target_size=(200,200)
+                target_size=(200,200),
+                param_columns=self.param_columns,
+                normalizer_path=self.normalizer_path,
             )
             print(f"[AL] Loaded dataset: {len(dataset)} samples.")
             self.save_dataset_phase_diagram(dataset, iteration=it+1)
@@ -276,7 +294,8 @@ class ActiveLearningLoop:
                 Tx_grid,
                 Tz_grid,
                 mc_samples=10,
-                device=self.device
+                device=self.device,
+                param_normalizer=dataset.param_normalizer,
             )
 
             # 4. Select K new points
@@ -380,7 +399,7 @@ class ActiveLearningLoop:
                 })
                 done_registry_rows.append(registry_row)
 
-            dataset.save(self.meta_path, self.fields_path)
+            dataset.save(self.meta_path, self.fields_path, normalizer_path=self.normalizer_path)
             self.upsert_registry_rows(done_registry_rows)
             print("[AL] Dataset updated.")
 
