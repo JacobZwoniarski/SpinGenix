@@ -47,16 +47,20 @@ class MagnetizationDataset(Dataset):
         # ------------------------------------------------------
         # Load fields from NPZ
         # ------------------------------------------------------
-        self.fields = np.load(fields_path, allow_pickle=True)
+        with np.load(fields_path, allow_pickle=True) as loaded_fields:
+            self.field_arrays = {
+                key: loaded_fields[key]
+                for key in loaded_fields.files
+            }
 
         # Ensure matching lengths
-        assert len(self.df) == len(self.fields.files), \
-            f"Metadata length {len(self.df)} != fields length {len(self.fields.files)}"
+        assert len(self.df) == len(self.field_arrays), \
+            f"Metadata length {len(self.df)} != fields length {len(self.field_arrays)}"
 
         # ------------------------------------------------------
         # Create a mapping index → array key
         # ------------------------------------------------------
-        self.keys = sorted(self.fields.files, key=lambda x: int(x))
+        self.keys = sorted(self.field_arrays.keys(), key=lambda x: int(x))
 
     def __len__(self):
         return len(self.keys)
@@ -71,7 +75,7 @@ class MagnetizationDataset(Dataset):
         # ------------------------------
         # Load magnetization field
         # ------------------------------
-        arr = self.fields[self.keys[idx]]
+        arr = self.field_arrays[self.keys[idx]]
 
         # Expected shapes:
         # current version: (1, H, W, 3)
@@ -132,8 +136,8 @@ class MagnetizationDataset(Dataset):
 
         # Store field
         key = str(idx)
-        self.fields.files.append(key)
-        self.fields[key] = field_array
+        self.field_arrays[key] = np.asarray(field_array, dtype=np.float32)
+        self.keys.append(key)
 
     def save(self, meta_path, fields_path):
         """
@@ -143,6 +147,9 @@ class MagnetizationDataset(Dataset):
         self.df.to_hdf(meta_path, key="data", mode="w", format="table")
 
         # Save fields
-        np.savez_compressed(fields_path, **{str(i): self.fields[str(i)] for i in range(len(self.df))})
+        np.savez_compressed(
+            fields_path,
+            **{str(i): self.field_arrays[str(i)] for i in range(len(self.df))}
+        )
 
         print(f"✔ Saved dataset:\n   meta → {meta_path}\n   fields → {fields_path}")

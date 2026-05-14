@@ -2,16 +2,25 @@
 data/
 models/
 experiments/
+results/
 *.h5
 *.npz
+*.parquet
+*.csv
 
 # Pliki systemowe/edytora
 __pycache__/
 *.pyc
 .DS_Store
 .ipynb_checkpoints/
+slurm-*.out
 
 # Pliki środowiskowe
 .env
 .venv/
+.venv_sg/
 env/
+
+# Lokalne notatki i materialy pomocnicze
+PLAN.md
+*.pdf

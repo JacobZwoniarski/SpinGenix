@@ -85,8 +85,8 @@ if __name__ == "__main__":
 
     # # Inicjalizacja managera symulacji
     manager = SimulationManager(
-        main_path="/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/",
-        destination_path="/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/",
+        main_path="/mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/",
+        destination_path="/mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/",
         prefix="vx5",
     )
     #print(params)

@@ -12,7 +12,7 @@ from .acquisition import select_top_k
 
 # visualization + phase diagram
 from .visualization import visualize_reconstruction
-from .phase_diagram import predict_phase_mz, plot_phase_diagram
+from .phase_diagram import predict_phase_mz, plot_phase_diagram, plot_dataset_phase_diagram
 
 # External modules
 from simulations.swapper import SimulationManager
@@ -32,12 +32,13 @@ class ActiveLearningLoop:
         raw_dir="data/raw/",
         processed_dir="data/processed/",
         results_dir="results/",
-        simulations_dir="/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/",
+        simulations_dir="/mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/",
         # AL PARAMS
         Tx_range=(10e-9, 100e-9),
         Tz_range=(10e-9, 100e-9),
         grid_points=40,
         k_new=20,
+        acquisition_min_distance=None,
         poll_interval=300,
         max_wait_hours=24,
         # TRAINING PARAMS
@@ -59,6 +60,7 @@ class ActiveLearningLoop:
         self.Tz_range = Tz_range
         self.grid_points = grid_points
         self.k_new = k_new
+        self.acquisition_min_distance = acquisition_min_distance
         self.poll_interval = poll_interval
         self.max_wait_hours = max_wait_hours
 
@@ -83,6 +85,12 @@ class ActiveLearningLoop:
         Tx_grid = np.linspace(self.Tx_range[0], self.Tx_range[1], self.grid_points)
         Tz_grid = np.linspace(self.Tz_range[0], self.Tz_range[1], self.grid_points)
         return Tx_grid, Tz_grid
+
+    @staticmethod
+    def format_param(value):
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            return format(float(value), ".5g")
+        return str(value)
 
     def wait_for_simulations(self, expected_paths):
         start = time.time()
@@ -111,7 +119,8 @@ class ActiveLearningLoop:
     # ---------------------------------------------------------------
 
     def save_reconstructions(self, model, dataset, iteration, N=5):
-        os.makedirs("results/reconstructions", exist_ok=True)
+        out_dir = os.path.join(self.results_dir, "reconstructions")
+        os.makedirs(out_dir, exist_ok=True)
 
         model.eval()
         indices = np.random.choice(len(dataset), size=min(N, len(dataset)), replace=False)
@@ -129,29 +138,46 @@ class ActiveLearningLoop:
             Tx, Tz = params.cpu().numpy()
 
             # HSL mode
-            visualize_reconstruction(orig, pred, Tx, Tz, mode="hsl")
-            plt.savefig(f"results/reconstructions/recon_iter{iteration}_idx{idx}_hsl.png",
-                        dpi=200, bbox_inches="tight")
-            plt.close()
+            fig, _ = visualize_reconstruction(orig, pred, Tx, Tz, mode="hsl")
+            fig.savefig(
+                os.path.join(out_dir, f"recon_iter{iteration}_idx{idx}_hsl.png"),
+                dpi=200,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
 
             # Components mode
-            visualize_reconstruction(orig, pred, Tx, Tz, mode="components")
-            plt.savefig(f"results/reconstructions/recon_iter{iteration}_idx{idx}_components.png",
-                        dpi=200, bbox_inches="tight")
-            plt.close()
+            fig, _ = visualize_reconstruction(orig, pred, Tx, Tz, mode="components")
+            fig.savefig(
+                os.path.join(out_dir, f"recon_iter{iteration}_idx{idx}_components.png"),
+                dpi=200,
+                bbox_inches="tight",
+            )
+            plt.close(fig)
+
+    def save_dataset_phase_diagram(self, dataset, iteration):
+        out_dir = os.path.join(self.results_dir, "phase_diagrams")
+        os.makedirs(out_dir, exist_ok=True)
+
+        fig, _ = plot_dataset_phase_diagram(
+            dataset.df,
+            save_path=os.path.join(out_dir, f"phase_dataset_iter{iteration}.png"),
+        )
+        plt.close(fig)
 
     def save_phase_diagram(self, model, iteration):
-        os.makedirs("results/phase_diagrams", exist_ok=True)
+        out_dir = os.path.join(self.results_dir, "phase_diagrams")
+        os.makedirs(out_dir, exist_ok=True)
 
         Tx_grid, Tz_grid = self.generate_grid()
         df = predict_phase_mz(model, Tx_grid, Tz_grid, device=self.device)
 
-        plt.figure()
-        plot_phase_diagram(df)
-
-        out_path = f"results/phase_diagrams/phase_iter{iteration}.png"
-        plt.savefig(out_path, dpi=200, bbox_inches="tight")
-        plt.close()
+        fig, _ = plot_phase_diagram(
+            df,
+            title="Model-Predicted Phase Diagram",
+            save_path=os.path.join(out_dir, f"phase_model_iter{iteration}.png"),
+        )
+        plt.close(fig)
 
     # ---------------------------------------------------------------
     # Main AL loop
@@ -172,6 +198,7 @@ class ActiveLearningLoop:
                 target_size=(200,200)
             )
             print(f"[AL] Loaded dataset: {len(dataset)} samples.")
+            self.save_dataset_phase_diagram(dataset, iteration=it+1)
 
             # 2. Train model
             model = UNetCVAE(spatial_size=200)
@@ -207,7 +234,22 @@ class ActiveLearningLoop:
             )
 
             # 4. Select K new points
-            new_Tx, new_Tz = select_top_k(U, Tx_grid, Tz_grid, K=self.k_new)
+            if self.acquisition_min_distance is None:
+                tx_step = abs(Tx_grid[1] - Tx_grid[0]) if len(Tx_grid) > 1 else 0.0
+                tz_step = abs(Tz_grid[1] - Tz_grid[0]) if len(Tz_grid) > 1 else 0.0
+                min_distance = 0.5 * min(tx_step, tz_step)
+            else:
+                min_distance = self.acquisition_min_distance
+
+            existing_points = dataset.df[["Tx_val", "Tz_val"]].to_numpy(dtype=float)
+            new_Tx, new_Tz = select_top_k(
+                U,
+                Tx_grid,
+                Tz_grid,
+                K=self.k_new,
+                min_distance=min_distance,
+                existing_points=existing_points,
+            )
             print(f"[AL] Selected {len(new_Tx)} new points for iteration {it+1}.")
 
             # 5. Submit simulations
@@ -222,7 +264,12 @@ class ActiveLearningLoop:
             )
 
             expected_paths = [
-                os.path.join(self.simulations_dir, f"Tx_{Tx}", f"Tz_{Tz}.zarr")
+                os.path.join(
+                    self.simulations_dir,
+                    self.sim_manager.prefix,
+                    f"Tx_{self.format_param(Tx)}",
+                    f"Tz_{self.format_param(Tz)}.zarr",
+                )
                 for Tx, Tz in zip(new_Tx, new_Tz)
             ]
 

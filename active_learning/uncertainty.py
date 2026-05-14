@@ -7,10 +7,10 @@ from tqdm import tqdm
 @torch.no_grad()
 def mc_dropout_forward(model, fields, cond, mc_samples=10):
     """
-    Runs the model forward mc_samples times with dropout activated.
+    Runs the stochastic CVAE forward pass mc_samples times.
     Returns a stacked tensor of shape (mc_samples, C, H, W)
     """
-    model.train()   # IMPORTANT: dropout ON during inference
+    model.eval()
 
     preds = []
     for _ in range(mc_samples):
@@ -58,7 +58,7 @@ def compute_uncertainty_map(model, Tx_grid, Tz_grid, mc_samples=10, device="cuda
     """
 
     model.to(device)
-    model.train()   # dropout ON
+    model.eval()
 
     H = 200
     W = 200

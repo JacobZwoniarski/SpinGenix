@@ -1,7 +1,17 @@
 import numpy as np
 
 
-def select_top_k(U, Tx_grid, Tz_grid, K=10, min_distance=0.0):
+def _is_too_close(point, points, min_distance):
+    if points is None or min_distance <= 0:
+        return False
+
+    for other in points:
+        if np.linalg.norm(np.array(point) - np.array(other)) < min_distance:
+            return True
+    return False
+
+
+def select_top_k(U, Tx_grid, Tz_grid, K=10, min_distance=0.0, existing_points=None):
     """
     Selects top K parameter points with highest uncertainty.
     Returns:
@@ -26,18 +36,16 @@ def select_top_k(U, Tx_grid, Tz_grid, K=10, min_distance=0.0):
         Tx = Tx_grid[i]
         Tz = Tz_grid[j]
 
-        # optional: enforce a minimum distance between selected points
-        if min_distance > 0:
-            too_close = False
-            for p in used_points:
-                if np.linalg.norm(np.array([Tx, Tz]) - np.array(p)) < min_distance:
-                    too_close = True
-                    break
-            if too_close:
-                continue
+        point = [Tx, Tz]
+
+        # optional: enforce distance from selected and already simulated points
+        if _is_too_close(point, used_points, min_distance):
+            continue
+        if _is_too_close(point, existing_points, min_distance):
+            continue
 
         new_Tx.append(float(Tx))
         new_Tz.append(float(Tz))
-        used_points.append([Tx, Tz])
+        used_points.append(point)
 
     return new_Tx, new_Tz

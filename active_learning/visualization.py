@@ -1,5 +1,16 @@
 import numpy as np
 import colorsys
+import getpass
+import os
+import tempfile
+import matplotlib
+
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    os.path.join(tempfile.gettempdir(), f"matplotlib-{getpass.getuser()}"),
+)
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import torch
 
@@ -95,42 +106,59 @@ def convert_to_rgb(field, mode="hsl"):
         raise ValueError(f"Unknown mode '{mode}'. Use 'hsl' or 'components'.")
 
 
+def _to_hwc_array(field):
+    if isinstance(field, torch.Tensor):
+        field = field.detach().cpu().numpy()
+
+    field = np.asarray(field)
+    if field.ndim == 4 and field.shape[0] == 1:
+        field = field[0]
+    if field.ndim != 3:
+        raise ValueError(f"Expected field shape (3,H,W) or (H,W,3), got {field.shape}")
+    if field.shape[0] == 3 and field.shape[-1] != 3:
+        field = np.transpose(field, (1, 2, 0))
+    if field.shape[-1] != 3:
+        raise ValueError(f"Expected 3 magnetization channels, got {field.shape}")
+
+    return field
+
+
 # =======================================================================
 # Reconstruction visualization
 # =======================================================================
 
-def visualize_reconstruction(original, predicted, Tx, Tz, mode="hsl"):
+def visualize_reconstruction(original, predicted, Tx, Tz, mode="hsl", save_path=None, show=False):
     """
-    Show side-by-side reconstruction for a single sample.
+    Build a side-by-side reconstruction figure for a single sample.
 
     original, predicted : tensors or numpy arrays in shape (3,H,W) or (H,W,3)
     Tx, Tz : param values (floats)
-    """
-    # Convert torch→numpy and reshape to (H,W,3)
-    if isinstance(original, torch.Tensor):
-        original = original.detach().cpu().numpy()
-    if isinstance(predicted, torch.Tensor):
-        predicted = predicted.detach().cpu().numpy()
 
-    if original.shape[0] == 3:
-        original = np.transpose(original, (1, 2, 0))
-    if predicted.shape[0] == 3:
-        predicted = np.transpose(predicted, (1, 2, 0))
+    Returns:
+        fig, axes
+    """
+    original = _to_hwc_array(original)
+    predicted = _to_hwc_array(predicted)
 
     rgb_orig = convert_to_rgb(original, mode=mode)
     rgb_pred = convert_to_rgb(predicted, mode=mode)
 
-    plt.figure(figsize=(10, 4))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
-    plt.subplot(1, 2, 1)
-    plt.title(f"Original\nTx={Tx*1e9:.1f} nm, Tz={Tz*1e9:.1f} nm")
-    plt.imshow(rgb_orig)
-    plt.axis("off")
+    axes[0].set_title(f"Original\nTx={Tx*1e9:.1f} nm, Tz={Tz*1e9:.1f} nm")
+    axes[0].imshow(rgb_orig)
+    axes[0].axis("off")
 
-    plt.subplot(1, 2, 2)
-    plt.title(f"Reconstruction ({mode})\nTx={Tx*1e9:.1f} nm, Tz={Tz*1e9:.1f} nm")
-    plt.imshow(rgb_pred)
-    plt.axis("off")
+    axes[1].set_title(f"Reconstruction ({mode})\nTx={Tx*1e9:.1f} nm, Tz={Tz*1e9:.1f} nm")
+    axes[1].imshow(rgb_pred)
+    axes[1].axis("off")
 
-    plt.tight_layout()
-    plt.show()
+    fig.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+
+    return fig, axes

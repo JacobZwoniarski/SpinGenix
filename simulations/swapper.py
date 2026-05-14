@@ -31,10 +31,35 @@ def upgrade_log_level(current_level: str, new_level: str) -> str:
     return levels[max(levels.index(current_level), levels.index(new_level))]
  
 class SimulationManager:
-    def __init__(self, main_path: str, destination_path: str, prefix: str) -> None:
+    DEFAULT_AMUMAX_BIN = "/mnt/storage_3/home/jakzwo/pl0095-01/scratch/bin/amumax"
+
+    def __init__(
+        self,
+        main_path: str,
+        destination_path: str,
+        prefix: str,
+        amumax_bin: Optional[str] = None,
+    ) -> None:
         self.main_path = main_path
         self.destination_path = destination_path
         self.prefix = prefix
+        self.amumax_bin = (
+            amumax_bin
+            or os.environ.get("AMUMAX_BIN")
+            or self.DEFAULT_AMUMAX_BIN
+        )
+
+    def validate_amumax_binary(self) -> None:
+        if not os.path.exists(self.amumax_bin):
+            raise FileNotFoundError(
+                f"amumax binary not found: {self.amumax_bin}. "
+                "Set AMUMAX_BIN to an executable amumax path."
+            )
+        if not os.access(self.amumax_bin, os.X_OK):
+            raise PermissionError(
+                f"amumax binary is not executable or not accessible: {self.amumax_bin}. "
+                "Fix permissions or set AMUMAX_BIN to an executable copy."
+            )
  
     @staticmethod
     def create_path_if_not_exists(file_path: str) -> None:
@@ -96,6 +121,12 @@ class SimulationManager:
             Rzeczywista liczba plików (kroków) w grupie 'm'; 0 w razie błędu lub braku danych.
         """
         file_count = 0
+        if (
+            os.path.exists(os.path.join(zarr_path, ".zattrs"))
+            and os.path.exists(os.path.join(zarr_path, "m_relaxed", ".zarray"))
+        ):
+            return (True, 1)
+
         try:
             zarr_store = zarr.open(zarr_path, mode='r')
             # Sprawdzamy, czy atrybut 'end_time' istnieje
@@ -208,8 +239,8 @@ class SimulationManager:
         # (D) Brak statusu => sprawdzamy .zarr (o ile istnieje)
         else:
             if os.path.exists(zarr_path):
-                zarr_file_count = self.check_simulation_completion(zarr_path)
-                if zarr_file_count:
+                zarr_file_complete, zarr_file_count = self.check_simulation_completion(zarr_path)
+                if zarr_file_complete:
                     sim_status_str = "done => no status file"
                     zarr_status_str = f"complete ({zarr_file_count} files)"
                     # W takim wypadku niby nic nie trzeba robić
@@ -234,6 +265,7 @@ class SimulationManager:
  
             # Uruchomienie (o ile sbatch == True)
             if sbatch:
+                self.validate_amumax_binary()
                 sim_sbatch_path = f"{self.main_path}{kwargs['prefix']}/sbatch/{sim_name}.sb"
                 self.create_path_if_not_exists(sim_sbatch_path)
                 with open(sim_sbatch_path, "w") as f:
@@ -268,6 +300,7 @@ class SimulationManager:
         done_file = f"{path}.mx3_status.done"
         interrupted_file = f"{path}.mx3_status.interrupted"
         final_path = self.destination_path + path.replace(self.main_path, "") + ".zarr"
+        amumax_bin = self.amumax_bin
  
             # Path for the bad nodes database
         bad_nodes_file = "/mnt/storage_3/home/jakzwo/bad_nodes.txt"
@@ -310,7 +343,13 @@ if [ ! -f "{bad_nodes_file}" ]; then
 fi
  
 mv "{mx3_file}" "{lock_file}"
-/mnt/storage_3/home/jakzwo/pl0095-01/scratch/bin/amumax -f --hide-progress-bar -o "{path}.zarr" "{lock_file}"
+if [ ! -x "{amumax_bin}" ]; then
+    echo "ERROR: amumax binary is not executable: {amumax_bin}"
+    mv "{lock_file}" "{interrupted_file}"
+    exit 126
+fi
+
+"{amumax_bin}" -f --hide-progress-bar -o "{path}.zarr" "{lock_file}"
 RESULT=$?
  
 if [ $RESULT -eq 0 ]; then
@@ -343,7 +382,7 @@ fi
     @staticmethod
     def raw_code(*args: List[str], **kwargs: Dict[str, Union[str, float, int]]) -> str:
         """Generate the raw code by filling in a template with parameters."""
-        template_path = "/mnt/storage_2/scratch/pl0095-01/jakzwo/simulations/template.mx3"
+        template_path = os.path.join(os.path.dirname(__file__), "template.mx3")
         return SimulationManager.replace_variables_in_template(template_path, kwargs)
  
     def submit_all_simulations(self, params: Dict[str, np.ndarray],

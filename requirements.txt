@@ -6,3 +6,9 @@ matplotlib
 h5py
 tables
 seaborn
+tqdm
+scipy
+rich
+zarr
+pyzfn
+discretisedfield
