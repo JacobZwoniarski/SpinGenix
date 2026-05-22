@@ -212,6 +212,11 @@ def main():
         help="Path to an executable amumax binary. Defaults to AMUMAX_BIN or SimulationManager default.",
     )
     parser.add_argument(
+        "--cuda-module",
+        default=None,
+        help="CUDA environment module to load inside submitted Slurm jobs. Defaults to CUDA_MODULE or cuda/12.6.0_560.28.03.",
+    )
+    parser.add_argument(
         "--skip-slurm-check",
         action="store_true",
         help="Bypass the active-job safety check before --submit.",
@@ -293,6 +298,7 @@ def main():
         destination_path=str(Path(args.raw_root)) + "/",
         prefix=args.prefix,
         amumax_bin=args.amumax_bin,
+        cuda_module=args.cuda_module,
     )
     params = {
         "Tx": [tx for tx, _ in to_submit],

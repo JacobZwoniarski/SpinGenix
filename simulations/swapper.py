@@ -39,6 +39,7 @@ class SimulationManager:
         destination_path: str,
         prefix: str,
         amumax_bin: Optional[str] = None,
+        cuda_module: Optional[str] = None,
     ) -> None:
         self.main_path = main_path
         self.destination_path = destination_path
@@ -47,6 +48,11 @@ class SimulationManager:
             amumax_bin
             or os.environ.get("AMUMAX_BIN")
             or self.DEFAULT_AMUMAX_BIN
+        )
+        self.cuda_module = (
+            cuda_module
+            if cuda_module is not None
+            else os.environ.get("CUDA_MODULE", "cuda/12.6.0_560.28.03")
         )
 
     def validate_amumax_binary(self) -> None:
@@ -301,6 +307,7 @@ class SimulationManager:
         interrupted_file = f"{path}.mx3_status.interrupted"
         final_path = self.destination_path + path.replace(self.main_path, "") + ".zarr"
         amumax_bin = self.amumax_bin
+        cuda_module = self.cuda_module
  
             # Path for the bad nodes database
         bad_nodes_file = "/mnt/storage_3/home/jakzwo/bad_nodes.txt"
@@ -330,6 +337,10 @@ sleep 10
  
 # Log node name
 echo "Running on node: $SLURMD_NODENAME"
+
+if [ -n "{cuda_module}" ]; then
+    module load "{cuda_module}"
+fi
  
 nvidia-smi
 echo "CUDA_VISIBLE_DEVICES = $CUDA_VISIBLE_DEVICES"
