@@ -104,6 +104,38 @@ def evaluate_reconstruction_model(model, dataset, device="cpu", max_samples=None
     return pd.DataFrame(rows), predictions
 
 
+@torch.no_grad()
+def evaluate_param_surrogate_model(model, dataset, device="cpu", max_samples=None):
+    model = model.to(device)
+    model.eval()
+
+    n_samples = len(dataset) if max_samples is None else min(int(max_samples), len(dataset))
+    rows = []
+    predictions = {}
+
+    for idx in range(n_samples):
+        field, params = dataset[idx]
+        prediction = model(params.unsqueeze(0).to(device))[0].cpu().numpy()
+        target = field.cpu().numpy()
+        metrics = reconstruction_metrics(target, prediction)
+
+        row = {
+            "sample_index": idx,
+            **metrics,
+        }
+        if "simulation_id" in dataset.df.columns:
+            row["simulation_id"] = dataset.df.iloc[idx]["simulation_id"]
+        if "split" in dataset.df.columns:
+            row["split"] = dataset.df.iloc[idx]["split"]
+        for column, value in zip(dataset.param_columns, dataset.physical_params(idx)):
+            row[column] = float(value)
+
+        rows.append(row)
+        predictions[idx] = prediction
+
+    return pd.DataFrame(rows), predictions
+
+
 def summarize_metrics(metrics_df):
     numeric = metrics_df.select_dtypes(include=[np.number])
     summary = {}
