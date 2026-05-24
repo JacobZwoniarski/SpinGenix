@@ -217,6 +217,11 @@ def main():
         help="CUDA environment module to load inside submitted Slurm jobs. Defaults to CUDA_MODULE or cuda/12.6.0_560.28.03.",
     )
     parser.add_argument(
+        "--use-bad-nodes",
+        action="store_true",
+        help="Use /mnt/storage_3/home/jakzwo/bad_nodes.txt as an sbatch --exclude list. Disabled by default.",
+    )
+    parser.add_argument(
         "--skip-slurm-check",
         action="store_true",
         help="Bypass the active-job safety check before --submit.",
@@ -299,6 +304,7 @@ def main():
         prefix=args.prefix,
         amumax_bin=args.amumax_bin,
         cuda_module=args.cuda_module,
+        use_bad_nodes=args.use_bad_nodes,
     )
     params = {
         "Tx": [tx for tx, _ in to_submit],

@@ -40,6 +40,7 @@ class SimulationManager:
         prefix: str,
         amumax_bin: Optional[str] = None,
         cuda_module: Optional[str] = None,
+        use_bad_nodes: Optional[bool] = None,
     ) -> None:
         self.main_path = main_path
         self.destination_path = destination_path
@@ -54,6 +55,13 @@ class SimulationManager:
             if cuda_module is not None
             else os.environ.get("CUDA_MODULE", "cuda/12.6.0_560.28.03")
         )
+        if use_bad_nodes is None:
+            use_bad_nodes = os.environ.get("SPINGENIX_USE_BAD_NODES", "").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+        self.use_bad_nodes = use_bad_nodes
 
     def validate_amumax_binary(self) -> None:
         if not os.path.exists(self.amumax_bin):
@@ -308,15 +316,16 @@ class SimulationManager:
         final_path = self.destination_path + path.replace(self.main_path, "") + ".zarr"
         amumax_bin = self.amumax_bin
         cuda_module = self.cuda_module
+        use_bad_nodes = self.use_bad_nodes
  
             # Path for the bad nodes database
         bad_nodes_file = "/mnt/storage_3/home/jakzwo/bad_nodes.txt"
        
         # Get excluded nodes from the bad_nodes file if it exists
         exclude_clause = ""
-        if os.path.exists(bad_nodes_file):
+        if use_bad_nodes and os.path.exists(bad_nodes_file):
             with open(bad_nodes_file, 'r') as f:
-                nodes = [node.strip() for node in f.readlines() if node.strip()]
+                nodes = sorted({node.strip() for node in f.readlines() if node.strip()})
             if nodes:
                 exclude_clause = f"#SBATCH --exclude={','.join(nodes)}"
  
@@ -348,8 +357,8 @@ echo "CUDA_VISIBLE_DEVICES = $CUDA_VISIBLE_DEVICES"
 source /mnt/storage_3/home/jakzwo/.bashrc
 export TMPDIR="/mnt/storage_3/home/jakzwo/pl0095-01/scratch/tmp/"
  
-# Create bad nodes file if it doesn't exist
-if [ ! -f "{bad_nodes_file}" ]; then
+# Create bad nodes file if this optional guard is enabled.
+if [ "{int(use_bad_nodes)}" = "1" ] && [ ! -f "{bad_nodes_file}" ]; then
     touch "{bad_nodes_file}"
 fi
  
@@ -371,7 +380,7 @@ else
     mv "{lock_file}" "{interrupted_file}"
    
     # Check if it was a CUDA error
-    if grep -q "CUDA_ERROR" "{path}.zarr/amumax.out" || nvidia-smi | grep -q "No devices were found"; then
+    if [ "{int(use_bad_nodes)}" = "1" ] && (grep -q "CUDA_ERROR" "{path}.zarr/amumax.out" || nvidia-smi | grep -q "No devices were found"); then
         # Add this node to the bad nodes list if not already present
         if ! grep -q "$SLURMD_NODENAME" "{bad_nodes_file}"; then
             echo "$SLURMD_NODENAME" >> "{bad_nodes_file}"
