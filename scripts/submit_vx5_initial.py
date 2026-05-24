@@ -202,6 +202,20 @@ def main():
         help="Limit how many incomplete points are submitted in this run.",
     )
     parser.add_argument(
+        "--large-submit-threshold",
+        type=int,
+        default=50,
+        help=(
+            "Refuse --submit without --max-submit if more than this many jobs "
+            "would be submitted."
+        ),
+    )
+    parser.add_argument(
+        "--allow-large-submit",
+        action="store_true",
+        help="Allow submitting more than --large-submit-threshold jobs at once.",
+    )
+    parser.add_argument(
         "--submit",
         action="store_true",
         help="Actually submit jobs with sbatch. Omit for dry run.",
@@ -269,6 +283,22 @@ def main():
     if not to_submit:
         print("nothing to submit")
         return
+    if (
+        args.max_submit is None
+        and len(to_submit) > args.large_submit_threshold
+        and not args.allow_large_submit
+    ):
+        print(
+            "ERROR: refusing a large submission without an explicit limit.",
+            file=sys.stderr,
+        )
+        print(
+            f"This run would submit {len(to_submit)} jobs; threshold is "
+            f"{args.large_submit_threshold}. Use --max-submit N for a small batch, "
+            "or pass --allow-large-submit if you intentionally want the full batch.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     if not args.skip_slurm_check:
         try:
