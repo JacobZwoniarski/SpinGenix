@@ -3,16 +3,19 @@ import colorsys
 import getpass
 import os
 import tempfile
-import matplotlib
 
 os.environ.setdefault(
     "MPLCONFIGDIR",
     os.path.join(tempfile.gettempdir(), f"matplotlib-{getpass.getuser()}"),
 )
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+import matplotlib
+
 matplotlib.use("Agg", force=True)
 import matplotlib.pyplot as plt
 import torch
+
+CHANNELS = ("Mx", "My", "Mz")
 
 
 # =======================================================================
@@ -47,11 +50,13 @@ def magnetization_to_hsl_rgb(arr):
     into HSL → RGB representation.
 
     Hue      = angle(mx + i my)
-    Saturation = magnitude
+    Saturation = in-plane magnitude
     Lightness  = (mz+1)/2
 
     Returns: RGB image in [0,1], shape (H,W,3)
     """
+    arr = np.nan_to_num(np.asarray(arr, dtype=np.float32), nan=0.0, posinf=1.0, neginf=-1.0)
+    arr = np.clip(arr, -1.0, 1.0)
     u = arr[:, :, 0]     # mx
     v = arr[:, :, 1]     # my
     w = arr[:, :, 2]     # mz
@@ -60,8 +65,9 @@ def magnetization_to_hsl_rgb(arr):
     H = np.angle(u + 1j * v)
     H = (H + np.pi) / (2 * np.pi)   # map [-π, π] → [0,1]
 
-    # Saturation = magnitude
-    S = np.sqrt(u*u + v*v + w*w)
+    # Saturation must be in-plane only. Using full |m| makes nearly uniform
+    # +/-Mz fields look falsely rainbow-colored because |m| ~= 1 everywhere.
+    S = np.sqrt(u*u + v*v)
     S = np.clip(S, 0, 1)
 
     # Lightness = scaled mz
@@ -83,6 +89,7 @@ def magnetization_to_component_rgb(arr):
         G = normalized my
         B = normalized mz
     """
+    arr = np.nan_to_num(np.asarray(arr, dtype=np.float32), nan=0.0, posinf=1.0, neginf=-1.0)
     rgb = (arr + 1) / 2.0
     rgb = np.clip(rgb, 0, 1)
     return rgb.astype(np.float32)
@@ -120,7 +127,7 @@ def _to_hwc_array(field):
     if field.shape[-1] != 3:
         raise ValueError(f"Expected 3 magnetization channels, got {field.shape}")
 
-    return field
+    return np.nan_to_num(field.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=-1.0)
 
 
 # =======================================================================
@@ -137,6 +144,16 @@ def visualize_reconstruction(original, predicted, Tx, Tz, mode="hsl", save_path=
     Returns:
         fig, axes
     """
+    if mode in {"component_panels", "component_panel", "panels"}:
+        return visualize_reconstruction_components(
+            original,
+            predicted,
+            Tx,
+            Tz,
+            save_path=save_path,
+            show=show,
+        )
+
     original = _to_hwc_array(original)
     predicted = _to_hwc_array(predicted)
 
@@ -154,6 +171,90 @@ def visualize_reconstruction(original, predicted, Tx, Tz, mode="hsl", save_path=
     axes[1].axis("off")
 
     fig.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+
+    return fig, axes
+
+
+def visualize_reconstruction_components(
+    original,
+    predicted,
+    Tx,
+    Tz,
+    save_path=None,
+    show=False,
+    diff_percentile=99.0,
+):
+    """
+    Scientific reconstruction diagnostic: target, prediction, and residual for
+    each magnetization component. Component colors are fixed to [-1, 1], so
+    panels from different samples stay comparable.
+    """
+    original = np.clip(_to_hwc_array(original), -1.0, 1.0)
+    predicted = np.clip(_to_hwc_array(predicted), -1.0, 1.0)
+    diff = predicted - original
+
+    finite_abs_diff = np.abs(diff[np.isfinite(diff)])
+    if finite_abs_diff.size:
+        diff_limit = float(np.percentile(finite_abs_diff, diff_percentile))
+        diff_limit = max(diff_limit, 0.05)
+    else:
+        diff_limit = 1.0
+
+    fig, axes = plt.subplots(3, 3, figsize=(10, 8), constrained_layout=True)
+    column_titles = ("Target", "Prediction", "Difference")
+    for col, title in enumerate(column_titles):
+        axes[0, col].set_title(title)
+
+    component_mappable = None
+    diff_mappable = None
+    for row, channel in enumerate(CHANNELS):
+        axes[row, 0].set_ylabel(channel, rotation=0, labelpad=22, va="center")
+        component_mappable = axes[row, 0].imshow(
+            original[:, :, row],
+            cmap="RdBu_r",
+            vmin=-1.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+        axes[row, 1].imshow(
+            predicted[:, :, row],
+            cmap="RdBu_r",
+            vmin=-1.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+        diff_mappable = axes[row, 2].imshow(
+            diff[:, :, row],
+            cmap="RdBu_r",
+            vmin=-diff_limit,
+            vmax=diff_limit,
+            interpolation="nearest",
+        )
+        for col in range(3):
+            axes[row, col].set_xticks([])
+            axes[row, col].set_yticks([])
+
+    fig.suptitle(f"Tx={Tx*1e9:.1f} nm, Tz={Tz*1e9:.1f} nm", y=1.02)
+    if component_mappable is not None:
+        fig.colorbar(
+            component_mappable,
+            ax=axes[:, :2].ravel().tolist(),
+            shrink=0.75,
+            label="m",
+        )
+    if diff_mappable is not None:
+        fig.colorbar(
+            diff_mappable,
+            ax=axes[:, 2].ravel().tolist(),
+            shrink=0.75,
+            label="prediction - target",
+        )
 
     if save_path:
         os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)

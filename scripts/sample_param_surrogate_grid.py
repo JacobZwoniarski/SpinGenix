@@ -85,10 +85,10 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--out-dir", default="results/param_surrogate_grid")
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--tx-min-nm", type=float, default=10.0)
-    parser.add_argument("--tx-max-nm", type=float, default=100.0)
-    parser.add_argument("--tz-min-nm", type=float, default=10.0)
-    parser.add_argument("--tz-max-nm", type=float, default=100.0)
+    parser.add_argument("--tx-min-nm", type=float, default=None)
+    parser.add_argument("--tx-max-nm", type=float, default=None)
+    parser.add_argument("--tz-min-nm", type=float, default=None)
+    parser.add_argument("--tz-max-nm", type=float, default=None)
     parser.add_argument("--grid-points", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--no-fields", action="store_true")
@@ -104,8 +104,16 @@ def main():
     if normalizer is None:
         raise RuntimeError("Checkpoint has no param_normalizer; cannot sample physical Tx/Tz grid.")
 
-    tx_values = np.linspace(nm_to_si(args.tx_min_nm), nm_to_si(args.tx_max_nm), args.grid_points)
-    tz_values = np.linspace(nm_to_si(args.tz_min_nm), nm_to_si(args.tz_max_nm), args.grid_points)
+    column_to_idx = {column: idx for idx, column in enumerate(normalizer.param_columns)}
+    tx_idx = column_to_idx.get("Tx_val", 0)
+    tz_idx = column_to_idx.get("Tz_val", 1)
+    tx_min_nm = args.tx_min_nm if args.tx_min_nm is not None else normalizer.mins[tx_idx] * 1e9
+    tx_max_nm = args.tx_max_nm if args.tx_max_nm is not None else normalizer.maxs[tx_idx] * 1e9
+    tz_min_nm = args.tz_min_nm if args.tz_min_nm is not None else normalizer.mins[tz_idx] * 1e9
+    tz_max_nm = args.tz_max_nm if args.tz_max_nm is not None else normalizer.maxs[tz_idx] * 1e9
+
+    tx_values = np.linspace(nm_to_si(tx_min_nm), nm_to_si(tx_max_nm), args.grid_points)
+    tz_values = np.linspace(nm_to_si(tz_min_nm), nm_to_si(tz_max_nm), args.grid_points)
     points = [(tx, tz) for tx in tx_values for tz in tz_values]
 
     rows = []
@@ -151,15 +159,21 @@ def main():
         fields_path = out_dir / "predicted_fields.npz"
         np.savez_compressed(fields_path, **fields)
 
-    fig, _ = plot_phase_diagram(
-        meta_df,
-        value_col="MeanMz_abs",
-        title="Param Surrogate Phase Diagram",
-        colorbar_label="Predicted |Mean Mz|",
-        save_path=out_dir / "phase_param_surrogate.png",
-    )
     import matplotlib.pyplot as plt
-    plt.close(fig)
+    phase_specs = [
+        ("MeanMz_abs", "Predicted |Mean Mz|", "phase_param_surrogate_abs.png", "viridis"),
+        ("MeanMz_signed", "Predicted Mean Mz", "phase_param_surrogate_signed.png", "coolwarm"),
+    ]
+    for value_col, label, filename, cmap in phase_specs:
+        fig, _ = plot_phase_diagram(
+            meta_df,
+            value_col=value_col,
+            title=f"Param Surrogate Phase Diagram ({value_col})",
+            colorbar_label=label,
+            cmap=cmap,
+            save_path=out_dir / filename,
+        )
+        plt.close(fig)
 
     print(f"checkpoint note: {checkpoint.get('note', '')}")
     print(f"points: {len(meta_df)}")
@@ -170,7 +184,9 @@ def main():
         print(f"metadata parquet skipped: {parquet_error}")
     if fields_path:
         print(f"fields: {fields_path}")
-    print(f"phase png: {out_dir / 'phase_param_surrogate.png'}")
+    print(f"sampled range: Tx={tx_min_nm:.3f}..{tx_max_nm:.3f} nm, Tz={tz_min_nm:.3f}..{tz_max_nm:.3f} nm")
+    print(f"phase png: {out_dir / 'phase_param_surrogate_abs.png'}")
+    print(f"phase png: {out_dir / 'phase_param_surrogate_signed.png'}")
 
 
 if __name__ == "__main__":

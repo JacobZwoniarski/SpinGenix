@@ -17,7 +17,7 @@ from .registry import (
 )
 
 # visualization + phase diagram
-from .visualization import visualize_reconstruction
+from .visualization import visualize_reconstruction, visualize_reconstruction_components
 from .phase_diagram import predict_phase_mz, plot_phase_diagram, plot_dataset_phase_diagram
 
 # External modules
@@ -195,7 +195,7 @@ class ActiveLearningLoop:
             plt.close(fig)
 
             # Components mode
-            fig, _ = visualize_reconstruction(orig, pred, Tx, Tz, mode="components")
+            fig, _ = visualize_reconstruction_components(orig, pred, Tx, Tz)
             fig.savefig(
                 os.path.join(out_dir, f"recon_iter{iteration}_idx{idx}_components.png"),
                 dpi=200,

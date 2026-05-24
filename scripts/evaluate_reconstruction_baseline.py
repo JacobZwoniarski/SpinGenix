@@ -33,7 +33,10 @@ from active_learning.evaluation import (  # noqa: E402
     summarize_metrics,
 )
 from active_learning.model import UNetCVAE  # noqa: E402
-from active_learning.visualization import visualize_reconstruction  # noqa: E402
+from active_learning.visualization import (  # noqa: E402
+    visualize_reconstruction,
+    visualize_reconstruction_components,
+)
 
 
 def load_model(checkpoint_path, device):
@@ -59,16 +62,26 @@ def save_reconstruction_pngs(dataset, predictions, out_dir, count):
     for idx in list(predictions.keys())[:count]:
         field, _ = dataset[idx]
         tx, tz = dataset.physical_params(idx)
+        hsl_path = out_dir / f"eval_recon_idx{idx}_hsl.png"
         fig, _ = visualize_reconstruction(
             field.cpu().numpy(),
             predictions[idx],
             tx,
             tz,
             mode="hsl",
-            save_path=out_dir / f"eval_recon_idx{idx}.png",
+            save_path=hsl_path,
         )
         plt.close(fig)
-        saved.append(out_dir / f"eval_recon_idx{idx}.png")
+        component_path = out_dir / f"eval_recon_idx{idx}_components.png"
+        fig, _ = visualize_reconstruction_components(
+            field.cpu().numpy(),
+            predictions[idx],
+            tx,
+            tz,
+            save_path=component_path,
+        )
+        plt.close(fig)
+        saved.extend([hsl_path, component_path])
     return saved
 
 
@@ -113,6 +126,10 @@ def main():
     print(f"cosine_similarity_mean: {summary.get('cosine_similarity_mean'):.6g}")
     print(f"metrics: {paths['metrics']}")
     print(f"summary: {paths['summary']}")
+    if "summary_by_split" in paths:
+        print(f"summary by split: {paths['summary_by_split']}")
+    if "worst" in paths:
+        print(f"worst cases: {paths['worst']}")
     if saved_pngs:
         print(f"pngs: {len(saved_pngs)} saved under {Path(args.out_dir) / 'reconstructions'}")
 

@@ -30,14 +30,17 @@ os.environ.setdefault(
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
 from active_learning.registry import (
+    HOLDOUT_SPLITS,
     PARAM_COLUMNS_V1,
     SPLITS,
+    TRAINING_SPLITS,
     compute_param_hash,
     infer_prefix_from_path,
     make_registry_row,
     read_registry,
     simulation_id,
     upsert_registry,
+    validate_strict_holdout,
 )
 from active_learning.normalization import ParamNormalizer, default_normalizer_path
 
@@ -90,6 +93,10 @@ def parse_named_param(path, name):
         if match:
             return float(match.group(1))
     return None
+
+
+def nm(value):
+    return float(value) * 1e9
 
 
 def read_zattrs(zarr_path):
@@ -251,6 +258,154 @@ def split_counts(records):
     return counts
 
 
+def read_registry_split_sets(registry_dir):
+    try:
+        registry_df = read_registry(registry_dir)
+    except FileNotFoundError:
+        return {}
+
+    if "param_hash" not in registry_df.columns or "split" not in registry_df.columns:
+        return {}
+
+    split_sets = {}
+    for phash, group in registry_df.dropna(subset=["param_hash"]).groupby("param_hash"):
+        splits = {
+            str(split)
+            for split in group["split"].dropna()
+            if str(split) in set(SPLITS)
+        }
+        if splits:
+            split_sets[str(phash)] = splits
+    return split_sets
+
+
+def preferred_holdout_split(splits):
+    for split in ("boundary_holdout", "test_holdout", "ood_holdout"):
+        if split in splits:
+            return split
+    return sorted(splits & HOLDOUT_SPLITS)[0]
+
+
+def annotate_registry_split_constraints(records, registry_dir, param_columns):
+    split_sets = read_registry_split_sets(registry_dir)
+    if not split_sets:
+        return {"fixed_holdout": 0, "training_protected": 0}
+
+    fixed_holdout = 0
+    training_protected = 0
+    for record in records:
+        phash = compute_param_hash(
+            registry_params(record, param_columns),
+            param_names=param_columns,
+        )
+        prior_splits = split_sets.get(phash, set())
+        record["_prior_registry_splits"] = sorted(prior_splits)
+        if prior_splits & HOLDOUT_SPLITS:
+            record["split"] = preferred_holdout_split(prior_splits)
+            record["_fixed_registry_split"] = True
+            record["_holdout_eligible"] = True
+            fixed_holdout += 1
+        elif prior_splits & TRAINING_SPLITS:
+            record["_holdout_eligible"] = False
+            training_protected += 1
+        else:
+            record["_holdout_eligible"] = True
+
+    return {
+        "fixed_holdout": fixed_holdout,
+        "training_protected": training_protected,
+    }
+
+
+def planned_registry_rows(records, raw_root, param_columns, source, iteration):
+    rows = []
+    for record in records:
+        params = registry_params(record, param_columns)
+        phash = compute_param_hash(params, param_names=param_columns)
+        prefix = infer_prefix_from_path(record["path"], raw_root=raw_root)
+        rows.append(make_registry_row(
+            params=params,
+            prefix=prefix,
+            split=record.get("split", "train"),
+            source=source,
+            status="planned_dataset_build",
+            iteration=iteration,
+            param_names=param_columns,
+            zarr_path=record["path"],
+            field_path="",
+            field_key=None,
+        ))
+        rows[-1]["param_hash"] = phash
+    return rows
+
+
+def validate_planned_registry_update(records, registry_dir, raw_root, param_columns, source, iteration):
+    import pandas as pd
+
+    if not records:
+        return
+
+    try:
+        existing_df = read_registry(registry_dir)
+    except FileNotFoundError:
+        existing_df = pd.DataFrame()
+
+    new_df = pd.DataFrame(
+        planned_registry_rows(records, raw_root, param_columns, source, iteration)
+    )
+    validate_strict_holdout(pd.concat([existing_df, new_df], ignore_index=True, sort=False))
+
+
+def print_axis_coverage(records, bins):
+    if not records:
+        return
+
+    import pandas as pd
+
+    df = pd.DataFrame({
+        "Tx_nm": [nm(record["Tx_val"]) for record in records],
+        "Tz_nm": [nm(record["Tz_val"]) for record in records],
+    })
+    tx_edges = np.linspace(df["Tx_nm"].min(), df["Tx_nm"].max(), bins + 1)
+    tz_edges = np.linspace(df["Tz_nm"].min(), df["Tz_nm"].max(), bins + 1)
+    tx_counts = pd.cut(df["Tx_nm"], bins=tx_edges, include_lowest=True).value_counts().sort_index()
+    tz_counts = pd.cut(df["Tz_nm"], bins=tz_edges, include_lowest=True).value_counts().sort_index()
+
+    print("Tx coverage [nm]:")
+    for interval, count in tx_counts.items():
+        print(f"  {interval}: {int(count)}")
+    print("Tz coverage [nm]:")
+    for interval, count in tz_counts.items():
+        print(f"  {interval}: {int(count)}")
+
+
+def write_selection_manifest(records, manifest_path, raw_root, param_columns, source):
+    import pandas as pd
+
+    rows = []
+    for record in records:
+        params = registry_params(record, param_columns)
+        phash = compute_param_hash(params, param_names=param_columns)
+        prefix = infer_prefix_from_path(record["path"], raw_root=raw_root)
+        rows.append({
+            "simulation_id": simulation_id(prefix, phash),
+            "param_hash": phash,
+            "prefix": prefix,
+            "split": record.get("split", "unknown"),
+            "source": source,
+            "Tx_val": record.get("Tx_val"),
+            "Tz_val": record.get("Tz_val"),
+            "Tx_nm": nm(record.get("Tx_val")) if record.get("Tx_val") is not None else None,
+            "Tz_nm": nm(record.get("Tz_val")) if record.get("Tz_val") is not None else None,
+            "source_path": str(record["path"]),
+        })
+
+    manifest_path = Path(manifest_path)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(manifest_path, index=False)
+    return manifest_path
+
+
 def apply_registry_splits(records, registry_dir, param_columns, default_split, require_all=False):
     try:
         registry_df = read_registry(registry_dir)
@@ -293,23 +448,50 @@ def assign_auto_splits(
     val_fraction=0.0,
     test_holdout_fraction=0.0,
     boundary_holdout_fraction=0.0,
+    registry_dir=None,
+    param_columns=PARAM_COLUMNS_V1,
 ):
     for record in records:
         record["split"] = default_split
+        record["_fixed_registry_split"] = False
+        record["_holdout_eligible"] = True
 
     if not records:
         return records
 
+    registry_constraints = {"fixed_holdout": 0, "training_protected": 0}
+    if registry_dir:
+        registry_constraints = annotate_registry_split_constraints(
+            records,
+            registry_dir,
+            param_columns,
+        )
+
     n_records = len(records)
-    available = set(range(n_records))
+    fixed = {
+        idx
+        for idx, record in enumerate(records)
+        if record.get("_fixed_registry_split")
+    }
+    available = set(range(n_records)) - fixed
+    holdout_eligible = {
+        idx
+        for idx in available
+        if records[idx].get("_holdout_eligible", True)
+    }
     rng = random.Random(seed)
 
-    def bounded_count(fraction):
+    def target_count(fraction):
         if fraction <= 0:
             return 0
-        return min(len(available), max(1, int(round(n_records * fraction))))
+        return max(1, int(round(n_records * fraction)))
 
-    boundary_count = bounded_count(boundary_holdout_fraction)
+    boundary_target = target_count(boundary_holdout_fraction)
+    current_boundary = sum(
+        1 for record in records if record.get("split") == "boundary_holdout"
+    )
+    boundary_count = max(0, boundary_target - current_boundary)
+    boundary_count = min(boundary_count, len(holdout_eligible))
     if boundary_count:
         tx = np.array([record["Tx_val"] for record in records], dtype=float)
         tz = np.array([record["Tz_val"] for record in records], dtype=float)
@@ -318,25 +500,36 @@ def assign_auto_splits(
         tx_norm = (tx - tx.min()) / tx_span
         tz_norm = (tz - tz.min()) / tz_span
         edge_score = np.minimum.reduce([tx_norm, 1 - tx_norm, tz_norm, 1 - tz_norm])
-        boundary_idx = sorted(available, key=lambda idx: (edge_score[idx], idx))[:boundary_count]
+        boundary_idx = sorted(holdout_eligible, key=lambda idx: (edge_score[idx], idx))[:boundary_count]
         for idx in boundary_idx:
             records[idx]["split"] = "boundary_holdout"
             available.remove(idx)
+            holdout_eligible.remove(idx)
 
-    def assign_random(split, fraction):
-        count = bounded_count(fraction)
+    def assign_random(split, fraction, pool):
+        target = target_count(fraction)
+        current = sum(1 for record in records if record.get("split") == split)
+        count = min(max(0, target - current), len(pool))
         if not count:
             return
-        choices = sorted(available)
+        choices = sorted(pool)
         rng.shuffle(choices)
         for idx in choices[:count]:
             records[idx]["split"] = split
             available.remove(idx)
+            if idx in holdout_eligible:
+                holdout_eligible.remove(idx)
 
-    assign_random("test_holdout", test_holdout_fraction)
-    assign_random("val", val_fraction)
+    assign_random("test_holdout", test_holdout_fraction, holdout_eligible)
+    assign_random("val", val_fraction, available)
     for idx in available:
         records[idx]["split"] = "train"
+    if registry_dir and (registry_constraints["fixed_holdout"] or registry_constraints["training_protected"]):
+        print(
+            "registry split constraints: "
+            f"fixed_holdout={registry_constraints['fixed_holdout']}, "
+            f"training_protected={registry_constraints['training_protected']}"
+        )
     return records
 
 
@@ -422,6 +615,17 @@ def main():
         help="Registry source label, e.g. initial_lhs, active_learning, manual.",
     )
     parser.add_argument(
+        "--dataset-mode",
+        choices=["generic", "vx5_bootstrap"],
+        default="generic",
+        help="Use a named dataset-building convention. vx5_bootstrap defaults to prefix=vx5 and source=vx5_bootstrap.",
+    )
+    parser.add_argument(
+        "--manifest-path",
+        default=None,
+        help="Optional CSV manifest listing the selected simulations and frozen splits.",
+    )
+    parser.add_argument(
         "--iteration",
         type=int,
         default=0,
@@ -460,6 +664,11 @@ def main():
         >= 1
     ):
         parser.error("Split fractions must leave at least one training fraction.")
+    if args.dataset_mode == "vx5_bootstrap":
+        if not args.prefixes:
+            args.prefixes = ["vx5"]
+        if args.source == "initial_lhs":
+            args.source = "vx5_bootstrap"
     param_columns = tuple(args.param_columns or PARAM_COLUMNS_V1)
 
     records = list(discover_zarr(args.raw_root, prefixes=args.prefixes))
@@ -490,6 +699,8 @@ def main():
             val_fraction=args.val_fraction,
             test_holdout_fraction=args.test_holdout_fraction,
             boundary_holdout_fraction=args.boundary_holdout_fraction,
+            registry_dir=args.registry_dir if not args.no_registry else None,
+            param_columns=param_columns,
         )
 
     print(f"Discovered {len(records)} candidate .zarr simulations.")
@@ -497,6 +708,27 @@ def main():
     print(f"split/source: {args.split}/{args.source}")
     print(f"split counts: {split_counts(selected)}")
     print(f"param columns: {', '.join(param_columns)}")
+    print_axis_coverage(selected, args.bins)
+
+    if not args.no_registry:
+        validate_planned_registry_update(
+            selected,
+            args.registry_dir,
+            args.raw_root,
+            param_columns,
+            args.source,
+            args.iteration,
+        )
+
+    if args.manifest_path:
+        manifest_path = write_selection_manifest(
+            selected,
+            args.manifest_path,
+            args.raw_root,
+            param_columns,
+            args.source,
+        )
+        print(f"Selection manifest: {manifest_path}")
 
     if args.dry_run:
         for record in selected[:20]:

@@ -95,6 +95,8 @@ def evaluate_reconstruction_model(model, dataset, device="cpu", max_samples=None
         }
         if "simulation_id" in dataset.df.columns:
             row["simulation_id"] = dataset.df.iloc[idx]["simulation_id"]
+        if "split" in dataset.df.columns:
+            row["split"] = dataset.df.iloc[idx]["split"]
         for column, value in zip(dataset.param_columns, dataset.physical_params(idx)):
             row[column] = float(value)
 
@@ -145,18 +147,77 @@ def summarize_metrics(metrics_df):
     return summary
 
 
-def save_evaluation_outputs(metrics_df, summary, out_dir):
+def summarize_metrics_by_split(metrics_df):
+    if "split" not in metrics_df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for split, split_df in metrics_df.groupby("split", dropna=False):
+        row = {"split": split, "samples": int(len(split_df))}
+        row.update(summarize_metrics(split_df))
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values("split").reset_index(drop=True)
+
+
+def worst_reconstruction_rows(metrics_df, top_n=10):
+    specs = []
+    if "mse" in metrics_df.columns:
+        specs.append(("mse", False, "highest_mse"))
+    if "cosine_similarity" in metrics_df.columns:
+        specs.append(("cosine_similarity", True, "lowest_cosine"))
+    if "abs_error_MeanMz_signed" in metrics_df.columns:
+        specs.append(("abs_error_MeanMz_signed", False, "highest_signed_mz_error"))
+    if "abs_error_Q" in metrics_df.columns:
+        specs.append(("abs_error_Q", False, "highest_q_error"))
+
+    rows = []
+    for column, ascending, reason in specs:
+        ordered = metrics_df.sort_values(column, ascending=ascending).head(top_n)
+        for rank, (_, row) in enumerate(ordered.iterrows(), start=1):
+            record = row.to_dict()
+            record["reason"] = reason
+            record["rank"] = rank
+            rows.append(record)
+
+    if "state_correct" in metrics_df.columns:
+        wrong = metrics_df[metrics_df["state_correct"] == 0].head(top_n)
+        for rank, (_, row) in enumerate(wrong.iterrows(), start=1):
+            record = row.to_dict()
+            record["reason"] = "wrong_state"
+            record["rank"] = rank
+            rows.append(record)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def save_evaluation_outputs(metrics_df, summary, out_dir, worst_top_n=10):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     metrics_path = out_dir / "reconstruction_metrics.csv"
     summary_path = out_dir / "reconstruction_summary.json"
+    per_split_path = out_dir / "reconstruction_summary_by_split.csv"
+    worst_path = out_dir / "worst_reconstructions.csv"
 
     metrics_df.to_csv(metrics_path, index=False)
     with open(summary_path, "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
 
-    return {
+    paths = {
         "metrics": metrics_path,
         "summary": summary_path,
     }
+
+    per_split = summarize_metrics_by_split(metrics_df)
+    if not per_split.empty:
+        per_split.to_csv(per_split_path, index=False)
+        paths["summary_by_split"] = per_split_path
+
+    worst = worst_reconstruction_rows(metrics_df, top_n=worst_top_n)
+    if not worst.empty:
+        worst.to_csv(worst_path, index=False)
+        paths["worst"] = worst_path
+
+    return paths

@@ -37,9 +37,13 @@ from active_learning.evaluation import (  # noqa: E402
     save_evaluation_outputs,
     summarize_metrics,
 )
+from active_learning.phase_diagram import plot_phase_diagram  # noqa: E402
 from active_learning.param_surrogate import ConditionalResNetDecoder  # noqa: E402
 from active_learning.trainer import WeightedMSELoss  # noqa: E402
-from active_learning.visualization import visualize_reconstruction  # noqa: E402
+from active_learning.visualization import (  # noqa: E402
+    visualize_reconstruction,
+    visualize_reconstruction_components,
+)
 
 HOLDOUT_SPLITS = {"test_holdout", "boundary_holdout", "ood_holdout"}
 
@@ -120,30 +124,85 @@ def run_epoch(model, loader, optimizer, device, rec_loss_fn, norm_weight):
     return total / max(rows, 1)
 
 
-def save_sample_reconstructions(model, dataset, indices, out_dir, device, count):
+def save_dataset_phase_plots(df, out_dir):
+    import matplotlib.pyplot as plt
+
+    phase_dir = Path(out_dir) / "phase_diagrams"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    saved = []
+
+    specs = [
+        ("MeanMz_abs", "|Mean Mz|", "phase_dataset_meanmz_abs.png", "viridis"),
+        ("MeanMz_signed", "Mean Mz", "phase_dataset_meanmz_signed.png", "coolwarm"),
+    ]
+    for value_col, colorbar_label, filename, cmap in specs:
+        if value_col not in df.columns:
+            continue
+        fig, _ = plot_phase_diagram(
+            df,
+            value_col=value_col,
+            title=f"Dataset Phase Diagram ({value_col})",
+            colorbar_label=colorbar_label,
+            cmap=cmap,
+            save_path=phase_dir / filename,
+        )
+        plt.close(fig)
+        saved.append(phase_dir / filename)
+    return saved
+
+
+def select_reconstruction_indices(eval_df, count):
+    if count <= 0 or eval_df.empty:
+        return []
+    sort_columns = []
+    ascending = []
+    if "state_correct" in eval_df.columns:
+        sort_columns.append("state_correct")
+        ascending.append(True)
+    if "mse" in eval_df.columns:
+        sort_columns.append("mse")
+        ascending.append(False)
+    if sort_columns:
+        ordered = eval_df.sort_values(sort_columns, ascending=ascending)
+    else:
+        ordered = eval_df
+    return ordered["sample_index"].astype(int).drop_duplicates().head(count).tolist()
+
+
+def save_sample_reconstructions(dataset, predictions, indices, out_dir, count):
     import matplotlib.pyplot as plt
 
     out_dir = Path(out_dir) / "reconstructions"
     out_dir.mkdir(parents=True, exist_ok=True)
     saved = []
-    model.eval()
 
     for idx in indices[:count]:
-        field, params = dataset[idx]
-        with torch.no_grad():
-            pred = model(params.unsqueeze(0).to(device))[0].cpu().numpy()
+        if idx not in predictions:
+            continue
+        field, _ = dataset[idx]
+        pred = predictions[idx]
         tx, tz = dataset.physical_params(idx)
-        path = out_dir / f"param_surrogate_idx{idx}.png"
+        hsl_path = out_dir / f"param_surrogate_idx{idx}_hsl.png"
         fig, _ = visualize_reconstruction(
             field.cpu().numpy(),
             pred,
             tx,
             tz,
             mode="hsl",
-            save_path=path,
+            save_path=hsl_path,
         )
         plt.close(fig)
-        saved.append(path)
+
+        component_path = out_dir / f"param_surrogate_idx{idx}_components.png"
+        fig, _ = visualize_reconstruction_components(
+            field.cpu().numpy(),
+            pred,
+            tx,
+            tz,
+            save_path=component_path,
+        )
+        plt.close(fig)
+        saved.extend([hsl_path, component_path])
     return saved
 
 
@@ -289,19 +348,29 @@ def main():
     eval_paths = save_evaluation_outputs(eval_df, summary, out_dir / "evaluation")
     print(f"eval metrics: {eval_paths['metrics']}")
     print(f"eval summary: {eval_paths['summary']}")
+    if "summary_by_split" in eval_paths:
+        print(f"eval summary by split: {eval_paths['summary_by_split']}")
+    if "worst" in eval_paths:
+        print(f"worst reconstructions: {eval_paths['worst']}")
     if "mse_mean" in summary:
         print(f"mse_mean: {summary['mse_mean']:.6g}")
     if "cosine_similarity_mean" in summary:
         print(f"cosine_similarity_mean: {summary['cosine_similarity_mean']:.6g}")
 
-    save_sample_reconstructions(
-        model,
+    phase_paths = save_dataset_phase_plots(base_dataset.df, out_dir)
+    for path in phase_paths:
+        print(f"phase plot: {path}")
+
+    recon_indices = select_reconstruction_indices(eval_df, args.save_png)
+    recon_paths = save_sample_reconstructions(
         base_dataset,
-        list(predictions.keys()),
+        predictions,
+        recon_indices,
         out_dir,
-        args.device,
         args.save_png,
     )
+    if recon_paths:
+        print(f"reconstruction pngs: {len(recon_paths)} saved under {out_dir / 'reconstructions'}")
 
 
 if __name__ == "__main__":

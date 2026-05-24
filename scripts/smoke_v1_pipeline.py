@@ -135,13 +135,29 @@ def validate_dataset(meta_path, fields_path):
 
 
 def save_dataset_phase_diagram(df, out_dir):
-    from active_learning.phase_diagram import plot_dataset_phase_diagram
+    from active_learning.phase_diagram import plot_phase_diagram
     import matplotlib.pyplot as plt
 
-    out_path = Path(out_dir) / "phase_diagrams" / "phase_dataset_smoke.png"
-    fig, _ = plot_dataset_phase_diagram(df, save_path=out_path)
-    plt.close(fig)
-    print(f"[plot] saved {out_path}")
+    phase_dir = Path(out_dir) / "phase_diagrams"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    specs = [
+        ("MeanMz_abs", "|Mean Mz|", "phase_dataset_smoke_abs.png", "viridis"),
+        ("MeanMz_signed", "Mean Mz", "phase_dataset_smoke_signed.png", "coolwarm"),
+    ]
+    for value_col, label, filename, cmap in specs:
+        if value_col not in df.columns:
+            continue
+        out_path = phase_dir / filename
+        fig, _ = plot_phase_diagram(
+            df,
+            value_col=value_col,
+            title=f"Dataset Phase Diagram ({value_col})",
+            colorbar_label=label,
+            cmap=cmap,
+            save_path=out_path,
+        )
+        plt.close(fig)
+        print(f"[plot] saved {out_path}")
 
 
 def training_smoke(
@@ -160,7 +176,10 @@ def training_smoke(
     from active_learning.dataset import MagnetizationDataset
     from active_learning.model import UNetCVAE
     from active_learning.trainer import train_cvae
-    from active_learning.visualization import visualize_reconstruction
+    from active_learning.visualization import (
+        visualize_reconstruction,
+        visualize_reconstruction_components,
+    )
     import matplotlib.pyplot as plt
 
     if device == "auto":
@@ -227,6 +246,17 @@ def training_smoke(
     )
     plt.close(fig)
     print(f"[reconstruction] saved {recon_path}")
+
+    recon_components_path = Path(out_dir) / "reconstructions" / "recon_smoke_components.png"
+    fig, _ = visualize_reconstruction_components(
+        field.cpu().numpy(),
+        recon[0].cpu().numpy(),
+        tx,
+        tz,
+        save_path=recon_components_path,
+    )
+    plt.close(fig)
+    print(f"[reconstruction] saved {recon_components_path}")
 
 
 def main():
