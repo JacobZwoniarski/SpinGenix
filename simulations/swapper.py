@@ -376,7 +376,10 @@ fi
 
 ldd "{amumax_bin}" | grep -E "lib(curand|cufft)|not found" || true
 
-"{amumax_bin}" -f --hide-progress-bar -o "{path}.zarr" "{lock_file}"
+"/lib64/ld-linux-x86-64.so.2" \
+    --library-path "{amumax_lib_dir}:$LD_LIBRARY_PATH" \
+    "{amumax_bin}" \
+    -f --hide-progress-bar -o "{path}.zarr" "{lock_file}"
 RESULT=$?
  
 if [ $RESULT -eq 0 ]; then
