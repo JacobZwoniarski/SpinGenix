@@ -35,6 +35,7 @@ from active_learning.registry import (
     compute_param_hash,
     infer_prefix_from_path,
     make_registry_row,
+    read_registry,
     simulation_id,
     upsert_registry,
 )
@@ -242,6 +243,103 @@ def registry_extra(record, metadata=None):
     return extra
 
 
+def split_counts(records):
+    counts = {}
+    for record in records:
+        split = record.get("split", "unknown")
+        counts[split] = counts.get(split, 0) + 1
+    return counts
+
+
+def apply_registry_splits(records, registry_dir, param_columns, default_split, require_all=False):
+    try:
+        registry_df = read_registry(registry_dir)
+    except FileNotFoundError:
+        if require_all:
+            raise
+        return records
+
+    if "param_hash" not in registry_df.columns or "split" not in registry_df.columns:
+        if require_all:
+            raise ValueError("Registry must contain param_hash and split columns.")
+        return records
+
+    split_by_hash = {
+        str(row["param_hash"]): row["split"]
+        for _, row in registry_df.dropna(subset=["param_hash", "split"]).iterrows()
+    }
+    missing = []
+    for record in records:
+        phash = compute_param_hash(
+            registry_params(record, param_columns),
+            param_names=param_columns,
+        )
+        split = split_by_hash.get(phash)
+        if split is None:
+            missing.append(str(record["path"]))
+            split = default_split
+        record["split"] = split
+
+    if require_all and missing:
+        preview = "\n  ".join(missing[:10])
+        raise ValueError(f"Registry split missing for {len(missing)} records:\n  {preview}")
+    return records
+
+
+def assign_auto_splits(
+    records,
+    seed,
+    default_split,
+    val_fraction=0.0,
+    test_holdout_fraction=0.0,
+    boundary_holdout_fraction=0.0,
+):
+    for record in records:
+        record["split"] = default_split
+
+    if not records:
+        return records
+
+    n_records = len(records)
+    available = set(range(n_records))
+    rng = random.Random(seed)
+
+    def bounded_count(fraction):
+        if fraction <= 0:
+            return 0
+        return min(len(available), max(1, int(round(n_records * fraction))))
+
+    boundary_count = bounded_count(boundary_holdout_fraction)
+    if boundary_count:
+        tx = np.array([record["Tx_val"] for record in records], dtype=float)
+        tz = np.array([record["Tz_val"] for record in records], dtype=float)
+        tx_span = max(float(tx.max() - tx.min()), np.finfo(float).eps)
+        tz_span = max(float(tz.max() - tz.min()), np.finfo(float).eps)
+        tx_norm = (tx - tx.min()) / tx_span
+        tz_norm = (tz - tz.min()) / tz_span
+        edge_score = np.minimum.reduce([tx_norm, 1 - tx_norm, tz_norm, 1 - tz_norm])
+        boundary_idx = sorted(available, key=lambda idx: (edge_score[idx], idx))[:boundary_count]
+        for idx in boundary_idx:
+            records[idx]["split"] = "boundary_holdout"
+            available.remove(idx)
+
+    def assign_random(split, fraction):
+        count = bounded_count(fraction)
+        if not count:
+            return
+        choices = sorted(available)
+        rng.shuffle(choices)
+        for idx in choices[:count]:
+            records[idx]["split"] = split
+            available.remove(idx)
+
+    assign_random("test_holdout", test_holdout_fraction)
+    assign_random("val", val_fraction)
+    for idx in available:
+        records[idx]["split"] = "train"
+    return records
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -296,6 +394,29 @@ def main():
         help="Split label assigned to all selected simulations in this build.",
     )
     parser.add_argument(
+        "--split-from-registry",
+        action="store_true",
+        help="Use existing registry param_hash -> split assignments when available.",
+    )
+    parser.add_argument(
+        "--require-registry-splits",
+        action="store_true",
+        help="Fail if --split-from-registry cannot find a split for every selected point.",
+    )
+    parser.add_argument(
+        "--auto-split",
+        action="store_true",
+        help="Assign train/val/test_holdout splits deterministically before preprocessing.",
+    )
+    parser.add_argument("--val-fraction", type=float, default=0.0)
+    parser.add_argument("--test-holdout-fraction", type=float, default=0.0)
+    parser.add_argument(
+        "--boundary-holdout-fraction",
+        type=float,
+        default=0.0,
+        help="Reserve parameter-space edge points as boundary_holdout.",
+    )
+    parser.add_argument(
         "--source",
         default="initial_lhs",
         help="Registry source label, e.g. initial_lhs, active_learning, manual.",
@@ -326,6 +447,19 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+    if args.auto_split and args.split_from_registry:
+        parser.error("--auto-split and --split-from-registry are mutually exclusive.")
+    for name in ("val_fraction", "test_holdout_fraction", "boundary_holdout_fraction"):
+        value = getattr(args, name)
+        if value < 0 or value >= 1:
+            parser.error(f"--{name.replace('_', '-')} must be in the range [0, 1).")
+    if (
+        args.val_fraction
+        + args.test_holdout_fraction
+        + args.boundary_holdout_fraction
+        >= 1
+    ):
+        parser.error("Split fractions must leave at least one training fraction.")
     param_columns = tuple(args.param_columns or PARAM_COLUMNS_V1)
 
     records = list(discover_zarr(args.raw_root, prefixes=args.prefixes))
@@ -338,10 +472,30 @@ def main():
             selected[: args.max_samples],
             key=lambda r: (r["Tx_val"], r["Tz_val"], str(r["path"])),
         )
+    for record in selected:
+        record["split"] = args.split
+    if args.split_from_registry:
+        selected = apply_registry_splits(
+            selected,
+            args.registry_dir,
+            param_columns,
+            args.split,
+            require_all=args.require_registry_splits,
+        )
+    if args.auto_split:
+        selected = assign_auto_splits(
+            selected,
+            args.seed,
+            args.split,
+            val_fraction=args.val_fraction,
+            test_holdout_fraction=args.test_holdout_fraction,
+            boundary_holdout_fraction=args.boundary_holdout_fraction,
+        )
 
     print(f"Discovered {len(records)} candidate .zarr simulations.")
     print(f"Selected {len(selected)} simulations for dataset build.")
     print(f"split/source: {args.split}/{args.source}")
+    print(f"split counts: {split_counts(selected)}")
     print(f"param columns: {', '.join(param_columns)}")
 
     if args.dry_run:
@@ -349,7 +503,10 @@ def main():
             params = registry_params(record, param_columns)
             phash = compute_param_hash(params, param_names=param_columns)
             prefix = infer_prefix_from_path(record["path"], raw_root=args.raw_root)
-            print(f"{record['path']}  hash={phash[:12]}  id={simulation_id(prefix, phash)}")
+            print(
+                f"{record['path']}  split={record['split']}  "
+                f"hash={phash[:12]}  id={simulation_id(prefix, phash)}"
+            )
         if len(selected) > 20:
             print(f"... {len(selected) - 20} more")
         return
@@ -367,6 +524,7 @@ def main():
 
     for idx, record in enumerate(selected):
         zarr_path = record["path"]
+        record_split = record.get("split", args.split)
         prefix = infer_prefix_from_path(zarr_path, raw_root=args.raw_root)
         params = registry_params(record, param_columns)
         phash = compute_param_hash(params, param_names=param_columns)
@@ -385,7 +543,7 @@ def main():
             metadata_rows.append({
                 "simulation_id": sim_id,
                 "param_hash": phash,
-                "split": args.split,
+                "split": record_split,
                 "field_key": field_key,
                 "Tx_val": Tx,
                 "Tz_val": Tz,
@@ -394,7 +552,7 @@ def main():
             registry_rows.append(make_registry_row(
                 params={**params, "Tx_val": Tx, "Tz_val": Tz},
                 prefix=prefix,
-                split=args.split,
+                split=record_split,
                 source=args.source,
                 status="done",
                 iteration=args.iteration,
@@ -409,7 +567,7 @@ def main():
             registry_rows.append(make_registry_row(
                 params=params,
                 prefix=prefix,
-                split=args.split,
+                split=record_split,
                 source=args.source,
                 status="preprocess_failed",
                 iteration=args.iteration,

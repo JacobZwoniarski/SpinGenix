@@ -41,6 +41,8 @@ from active_learning.param_surrogate import ConditionalResNetDecoder  # noqa: E4
 from active_learning.trainer import WeightedMSELoss  # noqa: E402
 from active_learning.visualization import visualize_reconstruction  # noqa: E402
 
+HOLDOUT_SPLITS = {"test_holdout", "boundary_holdout", "ood_holdout"}
+
 
 def set_seed(seed):
     random.seed(seed)
@@ -52,10 +54,25 @@ def set_seed(seed):
 
 def split_indices(dataset, val_fraction, seed):
     df = dataset.df.reset_index(drop=True)
-    if "split" in df.columns and (df["split"] == "val").any():
-        train_idx = df.index[df["split"] == "train"].tolist()
-        val_idx = df.index[df["split"] == "val"].tolist()
-        return train_idx, val_idx
+    if "split" in df.columns:
+        split = df["split"].fillna("train").astype(str)
+        train_idx = df.index[split == "train"].tolist()
+        val_idx = df.index[split == "val"].tolist()
+        holdout_idx = df.index[split.isin(HOLDOUT_SPLITS)].tolist()
+
+        if train_idx:
+            if not val_idx and val_fraction > 0 and len(train_idx) > 1:
+                rng = random.Random(seed)
+                shuffled = train_idx[:]
+                rng.shuffle(shuffled)
+                val_count = max(1, int(round(len(train_idx) * val_fraction)))
+                val_count = min(val_count, len(train_idx) - 1)
+                val_idx = sorted(shuffled[:val_count])
+                train_idx = sorted(shuffled[val_count:])
+            if holdout_idx:
+                print(f"held-out samples excluded from training: {len(holdout_idx)}")
+            return sorted(train_idx), sorted(val_idx)
+        raise ValueError("Dataset has a split column but no train samples.")
 
     indices = list(range(len(dataset)))
     if len(indices) < 2 or val_fraction <= 0:

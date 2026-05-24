@@ -20,10 +20,17 @@ if Tex <= 20e-9 {
 }
  
  
+// Keep the z cell size in a reasonable range for thick, small-diameter samples.
+// A fixed Nz=2 can produce huge dz/dx ratios near the Tex=20 nm -> Nx=50
+// threshold, which amumax rejects as an unrealistic cell aspect ratio.
 if Tez <= 30e-9{
     Nz = 1
-} else {
+} else if Tez <= 60e-9 {
     Nz = 2
+} else if Tez <= 90e-9 {
+    Nz = 3
+} else {
+    Nz = 4
 }
  
 Tx = Tex

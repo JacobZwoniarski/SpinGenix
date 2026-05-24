@@ -38,6 +38,12 @@ def main():
     parser.add_argument("--results-dir", default="results/v1_pipeline")
     parser.add_argument("--source", default="initial_lhs")
     parser.add_argument("--split", default="train")
+    parser.add_argument("--split-from-registry", action="store_true")
+    parser.add_argument("--require-registry-splits", action="store_true")
+    parser.add_argument("--auto-split", action="store_true")
+    parser.add_argument("--val-fraction", type=float, default=0.0)
+    parser.add_argument("--test-holdout-fraction", type=float, default=0.0)
+    parser.add_argument("--boundary-holdout-fraction", type=float, default=0.0)
     parser.add_argument("--min-complete", type=int, default=1)
     parser.add_argument(
         "--require-all-complete",
@@ -52,6 +58,8 @@ def main():
     parser.add_argument("--sample-grid", action="store_true")
     parser.add_argument("--grid-points", type=int, default=40)
     args = parser.parse_args()
+    if args.auto_split and args.split_from_registry:
+        parser.error("--auto-split and --split-from-registry are mutually exclusive.")
 
     results_dir = Path(args.results_dir)
     status_csv = results_dir / "status" / f"{args.prefix}_status.csv"
@@ -80,7 +88,7 @@ def main():
     if args.require_all_complete and complete != total:
         raise SystemExit(f"Only {complete}/{total} simulations are complete.")
 
-    run([
+    build_cmd = [
         sys.executable,
         "scripts/build_dataset_from_zarr.py",
         "--raw-root",
@@ -95,7 +103,22 @@ def main():
         args.split,
         "--source",
         args.source,
-    ])
+    ]
+    if args.split_from_registry:
+        build_cmd.append("--split-from-registry")
+    if args.require_registry_splits:
+        build_cmd.append("--require-registry-splits")
+    if args.auto_split:
+        build_cmd.extend([
+            "--auto-split",
+            "--val-fraction",
+            args.val_fraction,
+            "--test-holdout-fraction",
+            args.test_holdout_fraction,
+            "--boundary-holdout-fraction",
+            args.boundary_holdout_fraction,
+        ])
+    run(build_cmd)
 
     smoke_cmd = [
         sys.executable,
