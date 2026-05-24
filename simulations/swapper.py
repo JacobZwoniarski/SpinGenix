@@ -330,6 +330,8 @@ class SimulationManager:
             if nodes:
                 exclude_clause = f"#SBATCH --exclude={','.join(nodes)}"
  
+        user_tmp_dir = os.path.join(self.destination_path, "tmp")
+
         return f"""#!/bin/bash -l
 #SBATCH --job-name="{name}"
 #SBATCH --mail-type=NONE
@@ -360,7 +362,8 @@ echo "LD_LIBRARY_PATH = $LD_LIBRARY_PATH"
 nvidia-smi
 echo "CUDA_VISIBLE_DEVICES = $CUDA_VISIBLE_DEVICES"
  
-export TMPDIR="/mnt/storage_3/home/jakzwo/pl0095-01/scratch/tmp/"
+export TMPDIR="{user_tmp_dir}"
+mkdir -p "$TMPDIR/amumax_kernels"
  
 # Create bad nodes file if this optional guard is enabled.
 if [ "{int(use_bad_nodes)}" = "1" ] && [ ! -f "{bad_nodes_file}" ]; then
