@@ -315,6 +315,7 @@ class SimulationManager:
         interrupted_file = f"{path}.mx3_status.interrupted"
         final_path = self.destination_path + path.replace(self.main_path, "") + ".zarr"
         amumax_bin = self.amumax_bin
+        amumax_lib_dir = os.path.dirname(amumax_bin)
         cuda_module = self.cuda_module
         use_bad_nodes = self.use_bad_nodes
  
@@ -347,14 +348,18 @@ sleep 10
 # Log node name
 echo "Running on node: $SLURMD_NODENAME"
 
+source /mnt/storage_3/home/jakzwo/.bashrc
+
 if [ -n "{cuda_module}" ]; then
     module load "{cuda_module}"
 fi
+
+export LD_LIBRARY_PATH="{amumax_lib_dir}:$LD_LIBRARY_PATH"
+echo "LD_LIBRARY_PATH = $LD_LIBRARY_PATH"
  
 nvidia-smi
 echo "CUDA_VISIBLE_DEVICES = $CUDA_VISIBLE_DEVICES"
  
-source /mnt/storage_3/home/jakzwo/.bashrc
 export TMPDIR="/mnt/storage_3/home/jakzwo/pl0095-01/scratch/tmp/"
  
 # Create bad nodes file if this optional guard is enabled.
@@ -368,6 +373,8 @@ if [ ! -x "{amumax_bin}" ]; then
     mv "{lock_file}" "{interrupted_file}"
     exit 126
 fi
+
+ldd "{amumax_bin}" | grep -E "lib(curand|cufft)|not found" || true
 
 "{amumax_bin}" -f --hide-progress-bar -o "{path}.zarr" "{lock_file}"
 RESULT=$?
