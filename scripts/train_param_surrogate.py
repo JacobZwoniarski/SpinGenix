@@ -91,12 +91,17 @@ def split_indices(dataset, val_fraction, seed):
     return train_idx, val_idx
 
 
-def field_unit_norm_penalty(prediction):
+def field_unit_norm_penalty(prediction, target=None, mask_threshold=1e-4):
     norm = torch.linalg.norm(prediction, dim=1)
+    if target is not None:
+        target_norm = torch.linalg.norm(target, dim=1)
+        material_mask = target_norm > mask_threshold
+        if torch.any(material_mask):
+            return torch.mean(torch.abs(norm[material_mask] - 1.0))
     return torch.mean(torch.abs(norm - 1.0))
 
 
-def run_epoch(model, loader, optimizer, device, rec_loss_fn, norm_weight):
+def run_epoch(model, loader, optimizer, device, rec_loss_fn, norm_weight, mask_threshold):
     training = optimizer is not None
     model.train(training)
     total = 0.0
@@ -109,7 +114,7 @@ def run_epoch(model, loader, optimizer, device, rec_loss_fn, norm_weight):
         with torch.set_grad_enabled(training):
             pred = model(params)
             rec_loss = rec_loss_fn(pred, fields)
-            norm_loss = field_unit_norm_penalty(pred)
+            norm_loss = field_unit_norm_penalty(pred, fields, mask_threshold=mask_threshold)
             loss = rec_loss + norm_weight * norm_loss
 
             if training:
@@ -151,6 +156,54 @@ def save_dataset_phase_plots(df, out_dir):
     return saved
 
 
+def save_dataset_audit(df, out_dir):
+    eval_dir = Path(out_dir) / "evaluation"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    audit_df = df.copy()
+    audit_df["Tx_nm"] = audit_df["Tx_val"].astype(float) * 1e9
+    audit_df["Tz_nm"] = audit_df["Tz_val"].astype(float) * 1e9
+    split_counts = (
+        audit_df["split"].fillna("unspecified").astype(str).value_counts().sort_index().to_dict()
+        if "split" in audit_df.columns
+        else {"unspecified": int(len(audit_df))}
+    )
+    tx_bins = pd.cut(audit_df["Tx_nm"], bins=[0, 20, 40, 60, 80, 100, 120])
+    tz_bins = pd.cut(audit_df["Tz_nm"], bins=[0, 20, 40, 60, 80, 100, 120])
+    tx_by_split = pd.crosstab(tx_bins, audit_df.get("split", "unspecified"))
+    tz_by_split = pd.crosstab(tz_bins, audit_df.get("split", "unspecified"))
+    tx_by_split.to_csv(eval_dir / "dataset_tx_bins_by_split.csv")
+    tz_by_split.to_csv(eval_dir / "dataset_tz_bins_by_split.csv")
+
+    high_tx = audit_df[audit_df["Tx_nm"] >= 50.0]
+    summary = {
+        "samples": int(len(audit_df)),
+        "split_counts": split_counts,
+        "tx_nm": {
+            "min": float(audit_df["Tx_nm"].min()),
+            "max": float(audit_df["Tx_nm"].max()),
+            "mean": float(audit_df["Tx_nm"].mean()),
+        },
+        "tz_nm": {
+            "min": float(audit_df["Tz_nm"].min()),
+            "max": float(audit_df["Tz_nm"].max()),
+            "mean": float(audit_df["Tz_nm"].mean()),
+        },
+        "topup_tx_ge_50nm": {
+            "samples": int(len(high_tx)),
+            "split_counts": (
+                high_tx["split"].fillna("unspecified").astype(str).value_counts().sort_index().to_dict()
+                if "split" in high_tx.columns
+                else {"unspecified": int(len(high_tx))}
+            ),
+        },
+    }
+    summary_path = eval_dir / "dataset_audit.json"
+    with open(summary_path, "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, sort_keys=True)
+    return summary_path, summary
+
+
 def select_reconstruction_indices(eval_df, count):
     if count <= 0 or eval_df.empty:
         return []
@@ -169,20 +222,100 @@ def select_reconstruction_indices(eval_df, count):
     return ordered["sample_index"].astype(int).drop_duplicates().head(count).tolist()
 
 
-def save_sample_reconstructions(dataset, predictions, indices, out_dir, count):
+def _ordered_worst(df):
+    if df.empty:
+        return df
+    sort_columns = []
+    ascending = []
+    if "state_correct" in df.columns:
+        sort_columns.append("state_correct")
+        ascending.append(True)
+    if "mse" in df.columns:
+        sort_columns.append("mse")
+        ascending.append(False)
+    return df.sort_values(sort_columns, ascending=ascending) if sort_columns else df
+
+
+def _ordered_best(df):
+    if df.empty:
+        return df
+    if "mse" in df.columns:
+        return df.sort_values("mse", ascending=True)
+    return df
+
+
+def _add_reconstruction_example(examples, seen, row, label):
+    if row is None:
+        return
+    idx = int(row["sample_index"])
+    if idx in seen:
+        return
+    record = row.to_dict()
+    record["selection_label"] = label
+    examples.append(record)
+    seen.add(idx)
+
+
+def select_reconstruction_examples(eval_df, count, mode="balanced"):
+    if count <= 0 or eval_df.empty:
+        return []
+    if mode == "worst":
+        rows = eval_df[eval_df["sample_index"].isin(select_reconstruction_indices(eval_df, count))]
+        return [
+            {**row.to_dict(), "selection_label": "worst_overall"}
+            for _, row in rows.iterrows()
+        ][:count]
+
+    examples = []
+    seen = set()
+    high_tx = eval_df[eval_df["Tx_val"] >= 50e-9] if "Tx_val" in eval_df.columns else eval_df.iloc[0:0]
+    low_tx = eval_df[eval_df["Tx_val"] < 50e-9] if "Tx_val" in eval_df.columns else eval_df
+
+    for label, subset, order_fn in [
+        ("topup_high_tx_worst", high_tx, _ordered_worst),
+        ("topup_high_tx_best", high_tx, _ordered_best),
+        ("low_tx_worst", low_tx, _ordered_worst),
+        ("low_tx_best", low_tx, _ordered_best),
+    ]:
+        if len(examples) >= count:
+            break
+        ordered = order_fn(subset)
+        if not ordered.empty:
+            _add_reconstruction_example(examples, seen, ordered.iloc[0], label)
+
+    if "split" in eval_df.columns:
+        for split, split_df in eval_df.groupby("split", dropna=False):
+            if len(examples) >= count:
+                break
+            ordered = _ordered_worst(split_df)
+            if not ordered.empty:
+                _add_reconstruction_example(examples, seen, ordered.iloc[0], f"worst_split_{split}")
+
+    for _, row in _ordered_worst(eval_df).iterrows():
+        if len(examples) >= count:
+            break
+        _add_reconstruction_example(examples, seen, row, "worst_overall_fill")
+
+    return examples[:count]
+
+
+def save_sample_reconstructions(dataset, predictions, examples, out_dir, count):
     import matplotlib.pyplot as plt
 
     out_dir = Path(out_dir) / "reconstructions"
     out_dir.mkdir(parents=True, exist_ok=True)
     saved = []
+    selection_rows = []
 
-    for idx in indices[:count]:
+    for example in examples[:count]:
+        idx = int(example["sample_index"])
         if idx not in predictions:
             continue
+        label = str(example.get("selection_label", "sample")).replace("/", "_")
         field, _ = dataset[idx]
         pred = predictions[idx]
         tx, tz = dataset.physical_params(idx)
-        hsl_path = out_dir / f"param_surrogate_idx{idx}_hsl.png"
+        hsl_path = out_dir / f"param_surrogate_{label}_idx{idx}_hsl.png"
         fig, _ = visualize_reconstruction(
             field.cpu().numpy(),
             pred,
@@ -193,7 +326,7 @@ def save_sample_reconstructions(dataset, predictions, indices, out_dir, count):
         )
         plt.close(fig)
 
-        component_path = out_dir / f"param_surrogate_idx{idx}_components.png"
+        component_path = out_dir / f"param_surrogate_{label}_idx{idx}_components.png"
         fig, _ = visualize_reconstruction_components(
             field.cpu().numpy(),
             pred,
@@ -203,6 +336,72 @@ def save_sample_reconstructions(dataset, predictions, indices, out_dir, count):
         )
         plt.close(fig)
         saved.extend([hsl_path, component_path])
+        selection_rows.append(example)
+    if selection_rows:
+        pd.DataFrame(selection_rows).to_csv(out_dir / "selected_reconstructions.csv", index=False)
+    return saved
+
+
+@torch.no_grad()
+def sample_model_phase_dataframe(model, normalizer, device, grid_points, batch_size):
+    if normalizer is None:
+        raise RuntimeError("Cannot sample model phase grid without a parameter normalizer.")
+
+    column_to_idx = {column: idx for idx, column in enumerate(normalizer.param_columns)}
+    tx_idx = column_to_idx.get("Tx_val", 0)
+    tz_idx = column_to_idx.get("Tz_val", 1)
+    tx_values = np.linspace(normalizer.mins[tx_idx], normalizer.maxs[tx_idx], grid_points)
+    tz_values = np.linspace(normalizer.mins[tz_idx], normalizer.maxs[tz_idx], grid_points)
+    points = [(tx, tz) for tx in tx_values for tz in tz_values]
+
+    rows = []
+    model.eval()
+    for start in range(0, len(points), batch_size):
+        physical = np.asarray(points[start:start + batch_size], dtype=np.float64)
+        normalized = normalizer.transform(physical)
+        params = torch.tensor(normalized, dtype=torch.float32, device=device)
+        pred = model.sample(params).detach().cpu().numpy()
+        for local_idx, (tx, tz) in enumerate(physical):
+            field = pred[local_idx]
+            mz = field[2]
+            rows.append({
+                "Tx_val": float(tx),
+                "Tz_val": float(tz),
+                "Tx_nm": float(tx * 1e9),
+                "Tz_nm": float(tz * 1e9),
+                "MeanMz_signed": float(np.mean(mz)),
+                "MeanMz_abs": float(np.mean(np.abs(mz))),
+                "MeanMz": float(np.mean(np.abs(mz))),
+            })
+    return pd.DataFrame(rows)
+
+
+def save_model_phase_plots(model, normalizer, out_dir, device, grid_points, batch_size):
+    import matplotlib.pyplot as plt
+
+    phase_dir = Path(out_dir) / "phase_diagrams"
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    meta_df = sample_model_phase_dataframe(model, normalizer, device, grid_points, batch_size)
+    meta_path = phase_dir / "phase_model_predictions.csv"
+    meta_df.to_csv(meta_path, index=False)
+
+    saved = [meta_path]
+    specs = [
+        ("MeanMz_abs", "Predicted |Mean Mz|", "phase_model_meanmz_abs.png", "viridis"),
+        ("MeanMz_signed", "Predicted Mean Mz", "phase_model_meanmz_signed.png", "coolwarm"),
+    ]
+    for value_col, colorbar_label, filename, cmap in specs:
+        fig, _ = plot_phase_diagram(
+            meta_df,
+            value_col=value_col,
+            title=f"Model Phase Diagram ({value_col})",
+            colorbar_label=colorbar_label,
+            cmap=cmap,
+            overlay_points=False,
+            save_path=phase_dir / filename,
+        )
+        plt.close(fig)
+        saved.append(phase_dir / filename)
     return saved
 
 
@@ -223,7 +422,12 @@ def main():
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--norm-weight", type=float, default=0.01)
-    parser.add_argument("--save-png", type=int, default=4)
+    parser.add_argument("--mask-threshold", type=float, default=1e-4)
+    parser.add_argument("--save-png", type=int, default=8)
+    parser.add_argument("--recon-selection", choices=["balanced", "worst"], default="balanced")
+    parser.add_argument("--model-phase-grid-points", type=int, default=60)
+    parser.add_argument("--model-phase-batch-size", type=int, default=64)
+    parser.add_argument("--skip-model-phase", action="store_true")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -288,6 +492,14 @@ def main():
     print(f"device: {args.device}")
     print(f"samples: train={len(train_dataset)}, val={0 if val_dataset is None else len(val_dataset)}")
     print(f"model config: {model.config()}")
+    audit_path, audit = save_dataset_audit(base_dataset.df, out_dir)
+    print(f"dataset audit: {audit_path}")
+    print(
+        "dataset ranges: "
+        f"Tx={audit['tx_nm']['min']:.3f}..{audit['tx_nm']['max']:.3f} nm, "
+        f"Tz={audit['tz_nm']['min']:.3f}..{audit['tz_nm']['max']:.3f} nm, "
+        f"topup Tx>=50nm samples={audit['topup_tx_ge_50nm']['samples']}"
+    )
 
     if args.epochs == 0:
         field, params = train_dataset[0]
@@ -303,6 +515,7 @@ def main():
             args.device,
             rec_loss_fn,
             args.norm_weight,
+            args.mask_threshold,
         )
         val_loss = None
         if val_loader is not None:
@@ -313,6 +526,7 @@ def main():
                 args.device,
                 rec_loss_fn,
                 args.norm_weight,
+                args.mask_threshold,
             )
         row = {"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss}
         history.append(row)
@@ -360,12 +574,35 @@ def main():
     phase_paths = save_dataset_phase_plots(base_dataset.df, out_dir)
     for path in phase_paths:
         print(f"phase plot: {path}")
+    if (
+        not args.skip_model_phase
+        and args.model_phase_grid_points > 1
+        and args.max_samples is None
+        and args.epochs > 0
+        and args.device != "cpu"
+    ):
+        model_phase_paths = save_model_phase_plots(
+            model,
+            base_dataset.param_normalizer,
+            out_dir,
+            args.device,
+            args.model_phase_grid_points,
+            args.model_phase_batch_size,
+        )
+        for path in model_phase_paths:
+            print(f"model phase output: {path}")
+    elif not args.skip_model_phase:
+        print("model phase grid skipped for smoke/max-samples/cpu run")
 
-    recon_indices = select_reconstruction_indices(eval_df, args.save_png)
+    recon_examples = select_reconstruction_examples(
+        eval_df,
+        args.save_png,
+        mode=args.recon_selection,
+    )
     recon_paths = save_sample_reconstructions(
         base_dataset,
         predictions,
-        recon_indices,
+        recon_examples,
         out_dir,
         args.save_png,
     )

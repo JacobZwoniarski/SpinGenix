@@ -1,7 +1,6 @@
 import os
 import getpass
 import tempfile
-import warnings
 
 import torch
 import numpy as np
@@ -24,6 +23,11 @@ try:
 except Exception:  # pragma: no cover - scipy is part of the project env
     griddata = None
 
+try:
+    from scipy.ndimage import gaussian_filter
+except Exception:  # pragma: no cover - scipy is part of the project env
+    gaussian_filter = None
+
 
 @torch.no_grad()
 def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda", param_normalizer=None):
@@ -35,7 +39,6 @@ def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda", param_normalizer=No
     records = []
     H = getattr(model, "spatial_size", 200)
     W = getattr(model, "spatial_size", 200)
-    warned_dummy = False
 
     model.to(device)
     model.eval()
@@ -45,18 +48,11 @@ def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda", param_normalizer=No
             cond_values = np.array([tx, tz], dtype=np.float64)
             if param_normalizer is not None:
                 cond_values = param_normalizer.transform(cond_values)
-            cond = torch.tensor([cond_values], dtype=torch.float32, device=device)
+            cond_values = np.asarray(cond_values, dtype=np.float32)[None, :]
+            cond = torch.from_numpy(cond_values).to(device)
             if hasattr(model, "sample"):
                 recon = model.sample(cond)
             else:
-                if not warned_dummy:
-                    warnings.warn(
-                        "Model has no sample(params) method; using a zero-field "
-                        "reconstruction path for diagnostics only.",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    warned_dummy = True
                 dummy = torch.zeros((1, 3, H, W), dtype=torch.float32, device=device)
                 recon, _, _ = model(dummy, cond)
             recon = recon[0].cpu().numpy()  # (3, H, W)
@@ -119,6 +115,15 @@ def _default_cmap(value_col, cmap):
     return "viridis"
 
 
+def _axis_limits(values):
+    lower = float(np.min(values))
+    upper = float(np.max(values))
+    if np.isclose(lower, upper):
+        pad = max(abs(lower) * 0.02, 1.0)
+        return lower - pad, upper + pad
+    return lower, upper
+
+
 def _plot_landscape(
     ax,
     x,
@@ -129,6 +134,8 @@ def _plot_landscape(
     grid_resolution=240,
     interpolation="linear",
     levels=48,
+    fill_nearest=True,
+    smooth_sigma=1.0,
 ):
     if len(values) < 3:
         return None
@@ -148,14 +155,20 @@ def _plot_landscape(
         try:
             grid_z = griddata((x, y), values, (grid_x, grid_y), method=method)
             if grid_z is not None and np.isfinite(grid_z).any():
-                return ax.contourf(
-                    grid_x,
-                    grid_y,
+                if fill_nearest and np.isnan(grid_z).any():
+                    nearest = griddata((x, y), values, (grid_x, grid_y), method="nearest")
+                    if nearest is not None:
+                        grid_z = np.where(np.isnan(grid_z), nearest, grid_z)
+                if smooth_sigma and smooth_sigma > 0 and gaussian_filter is not None:
+                    grid_z = gaussian_filter(grid_z, sigma=float(smooth_sigma))
+                return ax.imshow(
                     grid_z,
-                    levels=levels,
+                    extent=(float(np.min(x)), float(np.max(x)), float(np.min(y)), float(np.max(y))),
+                    origin="lower",
                     cmap=cmap,
                     norm=norm,
-                    antialiased=True,
+                    interpolation="bicubic",
+                    aspect="auto",
                 )
         except Exception:
             pass
@@ -182,10 +195,12 @@ def plot_phase_diagram(
     cmap=None,
     style="landscape",
     overlay_points=True,
-    point_size=38,
-    grid_resolution=240,
+    point_size=22,
+    grid_resolution=300,
     interpolation="linear",
     levels=48,
+    fill_nearest=True,
+    smooth_sigma=1.0,
     ax=None,
     save_path=None,
     show=False,
@@ -229,6 +244,8 @@ def plot_phase_diagram(
             grid_resolution=grid_resolution,
             interpolation=interpolation,
             levels=levels,
+            fill_nearest=fill_nearest,
+            smooth_sigma=smooth_sigma,
         )
     elif style != "scatter":
         raise ValueError("style must be one of: 'landscape', 'surface', 'smooth', 'scatter'")
@@ -244,7 +261,7 @@ def plot_phase_diagram(
             s=point_size,
             edgecolors="black" if style != "scatter" else "none",
             linewidths=0.25 if style != "scatter" else 0.0,
-            alpha=0.85 if style != "scatter" else 1.0,
+            alpha=0.6 if style != "scatter" else 1.0,
         )
         if mappable is None:
             mappable = scatter
@@ -253,8 +270,8 @@ def plot_phase_diagram(
     ax.set_xlabel("Tx (nm)")
     ax.set_ylabel("Tz (nm)")
     ax.set_title(title)
-    ax.set_xlim(float(np.min(x)), float(np.max(x)))
-    ax.set_ylim(float(np.min(y)), float(np.max(y)))
+    ax.set_xlim(*_axis_limits(x))
+    ax.set_ylim(*_axis_limits(y))
 
     fig.tight_layout()
 

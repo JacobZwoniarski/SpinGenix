@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SpinGenix Demo Console</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <div class="brand-mark">SG</div>
+          <div>
+            <div class="eyebrow">SpinGenix</div>
+            <h1>Demo Console</h1>
+          </div>
+        </header>
+
+        <nav class="tabs" aria-label="Platform views">
+          <button class="tab is-active" data-view="demo">Demo</button>
+          <button class="tab" data-view="dataset">Dataset</button>
+          <button class="tab" data-view="phase">Phase Map</button>
+          <button class="tab" data-view="predict">Prediction</button>
+          <button class="tab" data-view="activeLearning">Active Learning</button>
+          <button class="tab" data-view="runs">Runs</button>
+        </nav>
+
+        <section class="control-panel">
+          <div class="panel-head">
+            <h2>Model Input</h2>
+            <span id="datasetBadge" class="status-pill">Loading</span>
+          </div>
+
+          <label>
+            <span>Checkpoint</span>
+            <select id="checkpointSelect"></select>
+          </label>
+
+          <div id="checkpointRange" class="range-card"></div>
+
+          <label class="slider-row">
+            <span>Tx</span>
+            <div class="slider-line">
+              <input id="txSlider" type="range" min="10" max="110" step="0.1" value="50">
+              <input id="txInput" class="number-input" type="number" min="1" step="0.1" value="50">
+              <b>nm</b>
+            </div>
+          </label>
+
+          <label class="slider-row">
+            <span>Tz</span>
+            <div class="slider-line">
+              <input id="tzSlider" type="range" min="10" max="110" step="0.1" value="50">
+              <input id="tzInput" class="number-input" type="number" min="1" step="0.1" value="50">
+              <b>nm</b>
+            </div>
+          </label>
+
+          <label>
+            <span>Device</span>
+            <select id="deviceSelect">
+              <option value="cpu">CPU</option>
+              <option value="cuda">CUDA</option>
+            </select>
+          </label>
+
+          <div id="presetList" class="preset-list"></div>
+
+          <button id="predictButton" class="primary-button">Generate Field</button>
+          <button id="refreshButton" class="secondary-button">Refresh Data</button>
+          <div id="predictStatus" class="status-line">Ready</div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <section id="demo" class="view is-active">
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">First two-parameter model demo</p>
+              <h2>Surrogate Field Explorer</h2>
+            </div>
+            <span id="demoReadiness" class="status-pill">Checking</span>
+          </div>
+
+          <div class="demo-grid">
+            <section class="demo-panel hero-panel">
+              <div class="panel-head">
+                <h3>Live Prediction</h3>
+                <span id="predictionLabel" class="muted-line">No prediction yet</span>
+              </div>
+              <figure class="prediction-figure">
+                <img id="predictionImage" alt="">
+                <figcaption id="predictionEmpty">Awaiting model output</figcaption>
+              </figure>
+              <div id="predictionWarnings" class="warning-stack"></div>
+            </section>
+
+            <section class="demo-panel">
+              <div class="panel-head">
+                <h3>Physics Readout</h3>
+                <span id="stateGuess" class="status-pill neutral">Unclassified</span>
+              </div>
+              <div id="predictionMetrics" class="metric-list"></div>
+            </section>
+
+            <section class="demo-panel">
+              <h3>Demo Sequence</h3>
+              <ol class="demo-sequence">
+                <li><span>1</span><b>Training envelope</b><small id="sequenceEnvelope">Pending</small></li>
+                <li><span>2</span><b>Interior sample</b><small>Stable model region</small></li>
+                <li><span>3</span><b>Boundary sample</b><small>Model stress point</small></li>
+                <li><span>4</span><b>AL handoff</b><small>Next simulations from uncertainty</small></li>
+              </ol>
+            </section>
+
+            <section class="demo-panel">
+              <div class="panel-head">
+                <h3>Phase Preview</h3>
+                <select id="phaseRunSelect"></select>
+              </div>
+              <div id="demoPhasePreview" class="phase-preview"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="dataset" class="view">
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Bootstrap coverage</p>
+              <h2>Dataset</h2>
+            </div>
+            <span id="datasetPath" class="muted-line">data/dataset</span>
+          </div>
+          <div id="metricsGrid" class="metrics-grid"></div>
+          <div class="split-grid">
+            <section class="data-panel">
+              <h3>Splits</h3>
+              <div id="splitBars" class="bar-list"></div>
+            </section>
+            <section class="data-panel">
+              <h3>Texture States</h3>
+              <div id="stateBars" class="bar-list"></div>
+            </section>
+          </div>
+          <section class="data-panel">
+            <h3>Latest Samples</h3>
+            <div id="recentSamples" class="table-wrap"></div>
+          </section>
+        </section>
+
+        <section id="phase" class="view">
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Interpolated phase landscape</p>
+              <h2>Phase Maps</h2>
+            </div>
+            <select id="phaseRunSelectFull"></select>
+          </div>
+          <div id="phaseGallery" class="image-grid"></div>
+        </section>
+
+        <section id="predict" class="view">
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Generated canonical field</p>
+              <h2>Prediction Detail</h2>
+            </div>
+            <span id="predictionDetailLabel" class="muted-line">No prediction yet</span>
+          </div>
+          <div class="prediction-detail-grid">
+            <section class="data-panel">
+              <h3>Current Output</h3>
+              <figure class="prediction-figure detail">
+                <img id="predictionImageDetail" alt="">
+                <figcaption id="predictionDetailEmpty">Awaiting model output</figcaption>
+              </figure>
+            </section>
+            <section class="data-panel">
+              <h3>Model Envelope</h3>
+              <div id="predictionEnvelope" class="metric-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="activeLearning" class="view">
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Next simulation candidates</p>
+              <h2>Active Learning</h2>
+            </div>
+            <select id="acquisitionSelect"></select>
+          </div>
+          <div id="acquisitionSummary" class="metrics-grid small"></div>
+          <div id="acquisitionTable" class="table-wrap"></div>
+        </section>
+
+        <section id="runs" class="view">
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Artifacts under results</p>
+              <h2>Runs</h2>
+            </div>
+            <span id="runCount" class="muted-line">0 runs</span>
+          </div>
+          <div id="runList" class="run-list"></div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

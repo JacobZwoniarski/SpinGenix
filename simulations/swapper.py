@@ -42,8 +42,8 @@ class SimulationManager:
         cuda_module: Optional[str] = None,
         use_bad_nodes: Optional[bool] = None,
     ) -> None:
-        self.main_path = main_path
-        self.destination_path = destination_path
+        self.main_path = os.path.join(main_path, "")
+        self.destination_path = os.path.join(destination_path, "")
         self.prefix = prefix
         self.amumax_bin = (
             amumax_bin

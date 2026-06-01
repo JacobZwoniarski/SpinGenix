@@ -2,7 +2,9 @@ import os
 import time
 import torch
 import numpy as np
+import pandas as pd
 from datetime import datetime
+from torch.utils.data import Subset
 
 from .dataset import MagnetizationDataset
 from .trainer import train_cvae
@@ -10,6 +12,7 @@ from .model import UNetCVAE
 from .uncertainty import compute_uncertainty_map
 from .acquisition import select_top_k
 from .registry import (
+    HOLDOUT_SPLITS,
     PARAM_COLUMNS_V1,
     make_registry_row,
     registry_points_and_hashes,
@@ -25,6 +28,18 @@ from simulations.swapper import SimulationManager
 from postprocess.preprocess import preprocess_simulation
 
 import matplotlib.pyplot as plt
+
+
+ACQUISITION_COLUMNS = [
+    "iteration",
+    "rank",
+    "Tx_val",
+    "Tz_val",
+    "Tx_nm",
+    "Tz_nm",
+    "expected_zarr_path",
+    "dry_run",
+]
 
 
 class ActiveLearningLoop:
@@ -46,9 +61,14 @@ class ActiveLearningLoop:
         Tz_range=(10e-9, 100e-9),
         grid_points=40,
         k_new=20,
+        mc_samples=10,
         acquisition_min_distance=None,
         poll_interval=300,
         max_wait_hours=24,
+        submit_simulations=True,
+        simulation_prefix="vxAL",
+        amumax_bin=None,
+        cuda_module=None,
         # TRAINING PARAMS
         epochs=20,
         batch_size=8,
@@ -72,9 +92,12 @@ class ActiveLearningLoop:
         self.Tz_range = Tz_range
         self.grid_points = grid_points
         self.k_new = k_new
+        self.mc_samples = mc_samples
         self.acquisition_min_distance = acquisition_min_distance
         self.poll_interval = poll_interval
         self.max_wait_hours = max_wait_hours
+        self.submit_simulations = submit_simulations
+        self.simulation_prefix = simulation_prefix
 
         # Training
         self.epochs = epochs
@@ -86,7 +109,9 @@ class ActiveLearningLoop:
         self.sim_manager = SimulationManager(
             main_path=simulations_dir,
             destination_path=simulations_dir,
-            prefix="vxAL"
+            prefix=simulation_prefix,
+            amumax_bin=amumax_bin,
+            cuda_module=cuda_module,
         )
 
     # ---------------------------------------------------------------
@@ -99,6 +124,10 @@ class ActiveLearningLoop:
         return Tx_grid, Tz_grid
 
     @staticmethod
+    def log(message):
+        print(message, flush=True)
+
+    @staticmethod
     def format_param(value):
         if isinstance(value, (int, float, np.integer, np.floating)):
             return format(float(value), ".5g")
@@ -108,22 +137,27 @@ class ActiveLearningLoop:
         start = time.time()
         max_wait = self.max_wait_hours * 3600
 
-        print(f"[AL] Waiting for {len(expected_paths)} simulation results...")
+        self.log(f"[AL] Waiting for {len(expected_paths)} simulation results...")
 
         while True:
-            ready = [p for p in expected_paths if os.path.exists(p)]
+            ready = [
+                p for p in expected_paths
+                if self.sim_manager.check_simulation_completion(p)[0]
+            ]
 
             if len(ready) == len(expected_paths):
-                print("[AL] All simulations finished.")
+                self.log("[AL] All simulations finished.")
                 return True
 
             elapsed = time.time() - start
             if elapsed > max_wait:
-                print("[AL] ERROR: Max waiting time exceeded.")
+                self.log("[AL] ERROR: Max waiting time exceeded.")
                 return False
 
-            print(f"[AL] {len(ready)}/{len(expected_paths)} ready... "
-                  f"sleeping {self.poll_interval} seconds.")
+            self.log(
+                f"[AL] {len(ready)}/{len(expected_paths)} complete... "
+                f"sleeping {self.poll_interval} seconds."
+            )
             time.sleep(self.poll_interval)
 
     def load_registry_exclusions(self):
@@ -135,14 +169,34 @@ class ActiveLearningLoop:
             param_columns=self.param_columns,
         )
         if points is not None:
-            print(f"[AL] Registry exclusions: {len(points)} points, {len(hashes)} hashes.")
+            self.log(f"[AL] Registry exclusions: {len(points)} points, {len(hashes)} hashes.")
         return points, hashes
 
     def upsert_registry_rows(self, rows):
         if not self.registry_path or not rows:
             return
         _, paths = upsert_registry(rows, registry_dir=self.registry_path)
-        print(f"[AL] Registry updated: {paths['csv']}")
+        self.log(f"[AL] Registry updated: {paths['csv']}")
+
+    def training_subset(self, dataset):
+        if "split" not in dataset.df.columns:
+            self.log("[AL] Dataset has no split column; training on all samples.")
+            return dataset
+
+        split = dataset.df["split"].fillna("train").astype(str)
+        train_idx = dataset.df.index[split == "train"].tolist()
+        excluded = dataset.df.index[split.isin(HOLDOUT_SPLITS)].tolist()
+        val_idx = dataset.df.index[split == "val"].tolist()
+
+        if not train_idx:
+            raise ValueError("Dataset split column exists, but no train samples are available.")
+
+        self.log(
+            "[AL] Training split: "
+            f"train={len(train_idx)}, val_excluded={len(val_idx)}, "
+            f"strict_holdout_excluded={len(excluded)}"
+        )
+        return Subset(dataset, train_idx)
 
     def registry_rows_for_points(self, tx_values, tz_values, zarr_paths, status, iteration, field_keys=None):
         rows = []
@@ -161,6 +215,26 @@ class ActiveLearningLoop:
                 field_key=field_key,
             ))
         return rows
+
+    def save_acquisition(self, iteration, tx_values, tz_values, expected_paths, dry_run=False):
+        out_dir = os.path.join(self.results_dir, "acquisition")
+        os.makedirs(out_dir, exist_ok=True)
+        rows = []
+        for rank, (Tx, Tz, path) in enumerate(zip(tx_values, tz_values, expected_paths), start=1):
+            rows.append({
+                "iteration": iteration,
+                "rank": rank,
+                "Tx_val": float(Tx),
+                "Tz_val": float(Tz),
+                "Tx_nm": float(Tx) * 1e9,
+                "Tz_nm": float(Tz) * 1e9,
+                "expected_zarr_path": path,
+                "dry_run": bool(dry_run),
+            })
+        path = os.path.join(out_dir, f"acquisition_iter{iteration}.csv")
+        pd.DataFrame(rows, columns=ACQUISITION_COLUMNS).to_csv(path, index=False)
+        self.log(f"[AL] Acquisition saved: {path}")
+        return path
 
     # ---------------------------------------------------------------
     # Save visualizations
@@ -248,9 +322,9 @@ class ActiveLearningLoop:
     def run(self, iterations=5):
 
         for it in range(iterations):
-            print("\n" + "="*60)
-            print(f"ACTIVE LEARNING ITERATION {it+1}/{iterations}")
-            print("="*60)
+            self.log("\n" + "="*60)
+            self.log(f"ACTIVE LEARNING ITERATION {it+1}/{iterations}")
+            self.log("="*60)
 
             # 1. Load dataset
             dataset = MagnetizationDataset(
@@ -261,14 +335,15 @@ class ActiveLearningLoop:
                 param_columns=self.param_columns,
                 normalizer_path=self.normalizer_path,
             )
-            print(f"[AL] Loaded dataset: {len(dataset)} samples.")
+            self.log(f"[AL] Loaded dataset: {len(dataset)} samples.")
             self.save_dataset_phase_diagram(dataset, iteration=it+1)
 
             # 2. Train model
             model = UNetCVAE(spatial_size=200)
+            train_dataset = self.training_subset(dataset)
             model = train_cvae(
                 model,
-                dataset,
+                train_dataset,
                 epochs=self.epochs,
                 batch_size=self.batch_size,
                 lr=self.lr,
@@ -278,22 +353,22 @@ class ActiveLearningLoop:
             # ------------------------------------------------------
             # NEW: save reconstructions + phase diagram
             # ------------------------------------------------------
-            print("[AL] Saving reconstructions...")
+            self.log("[AL] Saving reconstructions...")
             self.save_reconstructions(model, dataset, iteration=it+1)
 
-            print("[AL] Saving model-based phase diagram...")
+            self.log("[AL] Saving model-based phase diagram...")
             self.save_phase_diagram(model, iteration=it+1)
 
             # ------------------------------------------------------
             # 3. Compute uncertainty map
             # ------------------------------------------------------
             Tx_grid, Tz_grid = self.generate_grid()
-            print(f"[AL] Computing uncertainty on {self.grid_points}×{self.grid_points} grid...")
+            self.log(f"[AL] Computing uncertainty on {self.grid_points}×{self.grid_points} grid...")
             U = compute_uncertainty_map(
                 model,
                 Tx_grid,
                 Tz_grid,
-                mc_samples=10,
+                mc_samples=self.mc_samples,
                 device=self.device,
                 param_normalizer=dataset.param_normalizer,
             )
@@ -320,7 +395,7 @@ class ActiveLearningLoop:
                 excluded_hashes=registry_hashes,
                 param_columns=self.param_columns,
             )
-            print(f"[AL] Selected {len(new_Tx)} new points for iteration {it+1}.")
+            self.log(f"[AL] Selected {len(new_Tx)} new points for iteration {it+1}.")
 
             # 5. Submit simulations
             params = {"Tx": new_Tx, "Tz": new_Tz}
@@ -334,8 +409,23 @@ class ActiveLearningLoop:
                 )
                 for Tx, Tz in zip(new_Tx, new_Tz)
             ]
+            self.save_acquisition(
+                iteration=it + 1,
+                tx_values=new_Tx,
+                tz_values=new_Tz,
+                expected_paths=expected_paths,
+                dry_run=not self.submit_simulations,
+            )
 
-            print("[AL] Submitting new simulations to HPC...")
+            if not new_Tx:
+                self.log("[AL] No new points selected; skipping submit/wait/preprocess for this iteration.")
+                continue
+
+            if not self.submit_simulations:
+                self.log("[AL] Dry-run: not submitting simulations, not waiting, not updating dataset.")
+                continue
+
+            self.log("[AL] Submitting new simulations to HPC...")
             self.sim_manager.submit_all_simulations(
                 params,
                 last_param_name="Tz",
@@ -355,7 +445,7 @@ class ActiveLearningLoop:
                 raise TimeoutError("Timed out waiting for active-learning simulations.")
 
             # 7. Preprocess results
-            print("[AL] Preprocessing new results...")
+            self.log("[AL] Preprocessing new results...")
             done_registry_rows = []
             for zarr_path in expected_paths:
                 field, (Tx, Tz), metadata = preprocess_simulation(zarr_path)
@@ -401,6 +491,6 @@ class ActiveLearningLoop:
 
             dataset.save(self.meta_path, self.fields_path, normalizer_path=self.normalizer_path)
             self.upsert_registry_rows(done_registry_rows)
-            print("[AL] Dataset updated.")
+            self.log("[AL] Dataset updated.")
 
-        print("\n[AL] Active Learning completed successfully.")
+        self.log("\n[AL] Active Learning completed successfully.")

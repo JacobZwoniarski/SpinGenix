@@ -48,6 +48,7 @@ uncertainty_maps/
 logs/
 
 run_active_learning.py     # entry point for the pipeline
+platform_app/              # local web platform for dataset/results/model preview
 
 ---
 
@@ -65,7 +66,40 @@ run_active_learning.py     # entry point for the pipeline
 
 ## Running the Active Learning Pipeline
 
-python run_active_learning.py
+Dry-run first, without submitting Slurm jobs:
+
+```bash
+PYTHONUNBUFFERED=1 .venv_sg/bin/python -u run_active_learning.py \
+  --dry-run \
+  --iterations 1 \
+  --epochs 1 \
+  --grid-points 12 \
+  --k-new 5 \
+  --mc-samples 4 \
+  --device cuda \
+  --results-dir results/active_learning/dryrun_$(date +%Y%m%d_%H%M%S) \
+  --acquisition-min-distance-nm 0
+```
+
+Submit real active-learning simulations explicitly:
+
+```bash
+PYTHONUNBUFFERED=1 .venv_sg/bin/python -u run_active_learning.py \
+  --submit \
+  --iterations 1 \
+  --epochs 20 \
+  --grid-points 40 \
+  --k-new 20 \
+  --mc-samples 10 \
+  --device cuda \
+  --poll-interval 120 \
+  --max-wait-hours 24 \
+  --results-dir results/active_learning/run_$(date +%Y%m%d_%H%M%S) \
+  --simulations-dir /mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/ \
+  --simulation-prefix vxAL \
+  --amumax-bin /mnt/storage_5/scratch/pl0095-01/bin/amumax \
+  --cuda-module cuda/12.6.0_560.28.03
+```
 
 This performs:
 1. load existing dataset (or initialize from scratch),
@@ -76,6 +110,31 @@ This performs:
 6. poll the cluster until new `.zarr` outputs appear,
 7. preprocess → incorporate into dataset,
 8. iterate.
+
+`run_active_learning.py` intentionally requires either `--dry-run` or
+`--submit` so an accidental bare command cannot enqueue a large batch. The loop
+trains only on `split=train`; validation/test/boundary holdout points are used
+as exclusions for acquisition and are not appended back into training.
+
+---
+
+## Local Platform
+
+The first local dashboard is implemented without extra web dependencies:
+
+```bash
+cd /mnt/storage_5/scratch/pl0095-01/jakzwo/SpinGenix_remote
+.venv_sg/bin/python platform_app/server.py --host 127.0.0.1 --port 8765
+```
+
+Open `http://127.0.0.1:8765`. The platform reads `data/dataset` and `results`,
+shows split/state summaries, phase diagrams, active-learning acquisition CSVs,
+available checkpoints, and CPU/CUDA predictions for selected `Tx/Tz`.
+
+The V1 demo flow is documented in `docs/demo_v1_plan.md`. The UI is built
+around a two-parameter model demo: checkpoint envelope, preset `Tx/Tz` points,
+field generation, physics readout, phase-map context, and active-learning
+handoff.
 
 ---
 

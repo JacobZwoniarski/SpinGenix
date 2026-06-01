@@ -44,12 +44,13 @@ def compute_uncertainty_point(
     cond_values = np.array([Tx, Tz], dtype=np.float64)
     if param_normalizer is not None:
         cond_values = param_normalizer.transform(cond_values)
-    cond = torch.tensor([cond_values], dtype=torch.float32, device=device)
+    cond_values = np.asarray(cond_values, dtype=np.float32)[None, :]
+    cond = torch.from_numpy(cond_values).to(device)
 
     preds = mc_dropout_forward(model, dummy, cond, mc_samples=mc_samples)
 
     # Pixel-wise variance over MC samples
-    var_map = torch.var(preds, dim=0)  # (3, H, W)
+    var_map = torch.var(preds, dim=0, unbiased=False)  # (3, H, W)
 
     # Aggregate uncertainty:
     # L2 norm over channels → average across space

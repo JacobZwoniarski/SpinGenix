@@ -4,11 +4,15 @@ from .registry import PARAM_COLUMNS_V1, compute_param_hash
 
 
 def _is_too_close(point, points, min_distance):
-    if points is None or min_distance <= 0:
+    if points is None:
         return False
 
+    point_arr = np.array(point, dtype=float)
     for other in points:
-        if np.linalg.norm(np.array(point) - np.array(other)) < min_distance:
+        other_arr = np.array(other, dtype=float)
+        if np.allclose(point_arr, other_arr, rtol=0.0, atol=1e-15):
+            return True
+        if min_distance > 0 and np.linalg.norm(point_arr - other_arr) < min_distance:
             return True
     return False
 
