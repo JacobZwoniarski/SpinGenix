@@ -141,8 +141,8 @@ def save_dataset_phase_diagram(df, out_dir):
     phase_dir = Path(out_dir) / "phase_diagrams"
     phase_dir.mkdir(parents=True, exist_ok=True)
     specs = [
-        ("MeanMz_abs", "|Mean Mz|", "phase_dataset_smoke_abs.png", "viridis"),
-        ("MeanMz_signed", "Mean Mz", "phase_dataset_smoke_signed.png", "coolwarm"),
+        ("MeanMz_abs", "|Mean Mz|", "phase_dataset_smoke_abs.png", "cividis"),
+        ("MeanMz_signed", "Mean Mz", "phase_dataset_smoke_signed.png", "RdBu_r"),
     ]
     for value_col, label, filename, cmap in specs:
         if value_col not in df.columns:

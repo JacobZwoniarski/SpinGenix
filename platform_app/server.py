@@ -31,7 +31,6 @@ import torch  # noqa: E402
 
 from active_learning.normalization import ParamNormalizer  # noqa: E402
 from active_learning.param_surrogate import ConditionalResNetDecoder  # noqa: E402
-from active_learning.visualization import magnetization_to_hsl_rgb  # noqa: E402
 from postprocess.preprocess import classify_state, compute_topological_charge  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -168,7 +167,7 @@ def checkpoint_info(checkpoint_path):
         "size_mb": checkpoint_path.stat().st_size / (1024 * 1024),
     }
     try:
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         normalizer_payload = checkpoint.get("param_normalizer")
         info.update({
             "model_class": checkpoint.get("model_class"),
@@ -195,7 +194,7 @@ def list_result_runs():
         runs[relpath(run_dir)] = {
             "path": relpath(run_dir),
             "checkpoint": relpath(checkpoint),
-            "checkpoint_info": checkpoint_info(checkpoint),
+            "checkpoint_info": None,
             "kind": "param_surrogate",
             "summary": read_json_file(run_dir / "evaluation/reconstruction_summary.json"),
             "audit": read_json_file(run_dir / "evaluation/dataset_audit.json"),
@@ -228,7 +227,7 @@ def load_checkpoint(checkpoint_relpath, device="cpu"):
     if cache_key in CHECKPOINT_CACHE:
         return CHECKPOINT_CACHE[cache_key]
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if checkpoint.get("model_class") != "ConditionalResNetDecoder":
         raise ValueError("Only ConditionalResNetDecoder param_surrogate checkpoints are supported.")
 
@@ -242,14 +241,26 @@ def load_checkpoint(checkpoint_relpath, device="cpu"):
     return CHECKPOINT_CACHE[cache_key]
 
 
-def render_hsl_png_base64(field_hwc):
-    rgb = magnetization_to_hsl_rgb(field_hwc)
-    fig, ax = plt.subplots(figsize=(4, 4), dpi=130)
-    ax.imshow(rgb)
-    ax.set_axis_off()
-    fig.tight_layout(pad=0)
+def render_field_components_png_base64(field_hwc):
+    field = np.nan_to_num(np.asarray(field_hwc, dtype=np.float32), nan=0.0, posinf=1.0, neginf=-1.0)
+    field = np.clip(field, -1.0, 1.0)
+    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.7), dpi=150, constrained_layout=True)
+    mappable = None
+    for ax, channel, label in zip(axes, range(3), ("Mx", "My", "Mz")):
+        mappable = ax.imshow(
+            field[:, :, channel],
+            cmap="RdBu_r",
+            vmin=-1.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+        ax.set_title(label, fontsize=10)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    if mappable is not None:
+        fig.colorbar(mappable, ax=axes.ravel().tolist(), shrink=0.72, pad=0.02, label="m")
     buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", bbox_inches="tight", pad_inches=0)
+    fig.savefig(buffer, format="png", bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
@@ -312,7 +323,8 @@ def predict_param_surrogate(query):
             "Q": topological_charge,
         },
         "model_config": checkpoint_payload.get("model_config"),
-        "image_png_base64": render_hsl_png_base64(field_hwc),
+        "image_mode": "components",
+        "image_png_base64": render_field_components_png_base64(field_hwc),
     }
 
 
@@ -350,6 +362,13 @@ class PlatformHandler(BaseHTTPRequestHandler):
                     "dataset": dataset_summary(),
                     "runs": list_result_runs(),
                 })
+            if parsed.path == "/api/checkpoint-info":
+                query = parse_qs(parsed.query)
+                checkpoint = safe_repo_path(query.get("checkpoint", [""])[0])
+                if not checkpoint.exists() or checkpoint.is_dir():
+                    self.send_error(404)
+                    return
+                return self.send_json(checkpoint_info(checkpoint))
             if parsed.path == "/api/file":
                 query = parse_qs(parsed.query)
                 path = safe_repo_path(query.get("path", [""])[0])

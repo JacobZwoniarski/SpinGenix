@@ -105,18 +105,21 @@
             </section>
 
             <section class="demo-panel">
-              <h3>Demo Sequence</h3>
-              <ol class="demo-sequence">
-                <li><span>1</span><b>Training envelope</b><small id="sequenceEnvelope">Pending</small></li>
-                <li><span>2</span><b>Interior sample</b><small>Stable model region</small></li>
-                <li><span>3</span><b>Boundary sample</b><small>Model stress point</small></li>
-                <li><span>4</span><b>AL handoff</b><small>Next simulations from uncertainty</small></li>
-              </ol>
+              <div class="panel-head">
+                <h3>System Snapshot</h3>
+                <span id="handoffBadge" class="status-pill neutral">Loading</span>
+              </div>
+              <div class="snapshot-list">
+                <div class="snapshot-row"><span>Dataset</span><strong id="snapshotDataset">-</strong><small id="snapshotSplits">-</small></div>
+                <div class="snapshot-row"><span>Holdout</span><strong id="snapshotHoldout">-</strong><small>locked evaluation</small></div>
+                <div class="snapshot-row"><span>Envelope</span><strong id="snapshotEnvelope">-</strong><small>Tx / Tz</small></div>
+                <div class="snapshot-row"><span>Acquisition</span><strong id="snapshotAcquisition">-</strong><small>latest candidate batch</small></div>
+              </div>
             </section>
 
             <section class="demo-panel">
               <div class="panel-head">
-                <h3>Phase Preview</h3>
+                <h3>Phase Context</h3>
                 <select id="phaseRunSelect"></select>
               </div>
               <div id="demoPhasePreview" class="phase-preview"></div>
@@ -179,6 +182,10 @@
             <section class="data-panel">
               <h3>Model Envelope</h3>
               <div id="predictionEnvelope" class="metric-list"></div>
+            </section>
+            <section class="data-panel reconstruction-panel">
+              <h3>Reconstruction Checks</h3>
+              <div id="reconstructionGallery" class="reconstruction-strip"></div>
             </section>
           </div>
         </section>

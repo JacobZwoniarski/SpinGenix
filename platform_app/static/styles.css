@@ -131,6 +131,8 @@ h3 {
 }
 
 .tab {
+  display: flex;
+  align-items: center;
   width: 100%;
   min-height: 42px;
   padding: 0 12px;
@@ -139,6 +141,7 @@ h3 {
   color: #dce1df;
   font-size: 14px;
   font-weight: 720;
+  line-height: 1.2;
   text-align: left;
   white-space: normal;
 }
@@ -281,6 +284,7 @@ input[type="range"] {
   border: 1px solid transparent;
   font-size: 14px;
   font-weight: 780;
+  line-height: 1.2;
   white-space: normal;
 }
 
@@ -339,7 +343,7 @@ input[type="range"] {
 
 .workspace {
   min-width: 0;
-  padding: 26px;
+  padding: 24px;
 }
 
 .view {
@@ -360,7 +364,8 @@ input[type="range"] {
 
 .demo-grid {
   display: grid;
-  grid-template-columns: minmax(420px, 1.35fr) minmax(300px, 0.9fr);
+  grid-template-columns: minmax(460px, 1.25fr) minmax(320px, 0.85fr);
+  align-items: start;
   gap: 16px;
 }
 
@@ -388,22 +393,22 @@ input[type="range"] {
   position: relative;
   display: grid;
   place-items: center;
-  min-height: 420px;
+  min-height: 360px;
   margin-top: 14px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #111719;
+  background: var(--surface-2);
 }
 
 .prediction-figure.detail {
-  min-height: 500px;
+  min-height: 420px;
 }
 
 .prediction-figure img {
   display: none;
-  width: min(100%, 520px);
-  aspect-ratio: 1 / 1;
+  width: min(100%, 760px);
+  max-height: 100%;
   object-fit: contain;
 }
 
@@ -452,6 +457,48 @@ input[type="range"] {
 
 .metric-row strong {
   font-variant-numeric: tabular-nums;
+}
+
+.metric-row strong {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.snapshot-list {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.snapshot-row {
+  display: grid;
+  grid-template-columns: minmax(82px, 0.55fr) minmax(0, 1fr);
+  gap: 3px 12px;
+  align-items: center;
+  min-height: 50px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.snapshot-row span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.snapshot-row strong {
+  font-size: 16px;
+  font-weight: 850;
+  overflow-wrap: anywhere;
+}
+
+.snapshot-row small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .demo-sequence {
@@ -505,8 +552,9 @@ input[type="range"] {
   width: 100%;
   max-height: 270px;
   object-fit: contain;
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: #111719;
+  background: var(--surface-2);
 }
 
 .metrics-grid {
@@ -546,6 +594,46 @@ input[type="range"] {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
   margin-bottom: 16px;
+}
+
+.reconstruction-panel {
+  grid-column: 1 / -1;
+}
+
+.reconstruction-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.reconstruction-strip figure {
+  margin: 0;
+  min-width: 0;
+}
+
+.reconstruction-strip img {
+  display: block;
+  width: 100%;
+  min-height: 170px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.reconstruction-strip figcaption,
+.phase-caption {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.phase-caption strong {
+  display: block;
+  color: var(--ink);
+  font-size: 13px;
 }
 
 .bar-list {
@@ -627,8 +715,9 @@ th {
   width: 100%;
   min-height: 240px;
   object-fit: contain;
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: #111719;
+  background: var(--surface-2);
 }
 
 .image-tile figcaption {
@@ -723,6 +812,7 @@ th {
   }
 
   .tab {
+    justify-content: center;
     text-align: center;
   }
 

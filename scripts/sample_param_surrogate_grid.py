@@ -161,8 +161,8 @@ def main():
 
     import matplotlib.pyplot as plt
     phase_specs = [
-        ("MeanMz_abs", "Predicted |Mean Mz|", "phase_param_surrogate_abs.png", "viridis"),
-        ("MeanMz_signed", "Predicted Mean Mz", "phase_param_surrogate_signed.png", "coolwarm"),
+        ("MeanMz_abs", "Predicted |Mean Mz|", "phase_param_surrogate_abs.png", "cividis"),
+        ("MeanMz_signed", "Predicted Mean Mz", "phase_param_surrogate_signed.png", "RdBu_r"),
     ]
     for value_col, label, filename, cmap in phase_specs:
         fig, _ = plot_phase_diagram(

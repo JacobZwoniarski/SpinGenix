@@ -111,8 +111,18 @@ def _default_cmap(value_col, cmap):
     if cmap is not None:
         return cmap
     if "signed" in str(value_col).lower():
-        return "coolwarm"
-    return "viridis"
+        return "RdBu_r"
+    return "cividis"
+
+
+def _prepare_cmap(value_col, cmap):
+    resolved = plt.get_cmap(_default_cmap(value_col, cmap))
+    try:
+        resolved = resolved.copy()
+    except AttributeError:
+        pass
+    resolved.set_bad("#f6f7f5", alpha=0.0)
+    return resolved
 
 
 def _axis_limits(values):
@@ -131,11 +141,11 @@ def _plot_landscape(
     values,
     cmap,
     norm,
-    grid_resolution=240,
+    grid_resolution=220,
     interpolation="linear",
-    levels=48,
-    fill_nearest=True,
-    smooth_sigma=1.0,
+    levels=32,
+    fill_nearest=False,
+    smooth_sigma=0.0,
 ):
     if len(values) < 3:
         return None
@@ -145,11 +155,37 @@ def _plot_landscape(
     if x_unique.size < 2 or y_unique.size < 2:
         return None
 
+    if x_unique.size * y_unique.size == len(values):
+        grid_z = np.full((y_unique.size, x_unique.size), np.nan, dtype=float)
+        x_index = {value: idx for idx, value in enumerate(x_unique)}
+        y_index = {value: idx for idx, value in enumerate(y_unique)}
+        has_duplicate = False
+        for xi, yi, zi in zip(x, y, values):
+            row = y_index[yi]
+            col = x_index[xi]
+            if np.isfinite(grid_z[row, col]):
+                has_duplicate = True
+                break
+            grid_z[row, col] = zi
+        if not has_duplicate:
+            return ax.pcolormesh(
+                x_unique,
+                y_unique,
+                np.ma.masked_invalid(grid_z),
+                shading="auto",
+                cmap=cmap,
+                norm=norm,
+                antialiased=False,
+                rasterized=True,
+            )
+
     if griddata is not None:
         xi = np.linspace(float(np.min(x)), float(np.max(x)), grid_resolution)
         yi = np.linspace(float(np.min(y)), float(np.max(y)), grid_resolution)
         grid_x, grid_y = np.meshgrid(xi, yi)
         method = interpolation
+        if method not in {"nearest", "linear", "cubic"}:
+            method = "linear"
         if method == "cubic" and len(values) < 16:
             method = "linear"
         try:
@@ -159,15 +195,20 @@ def _plot_landscape(
                     nearest = griddata((x, y), values, (grid_x, grid_y), method="nearest")
                     if nearest is not None:
                         grid_z = np.where(np.isnan(grid_z), nearest, grid_z)
-                if smooth_sigma and smooth_sigma > 0 and gaussian_filter is not None:
+                if (
+                    smooth_sigma
+                    and smooth_sigma > 0
+                    and gaussian_filter is not None
+                    and np.isfinite(grid_z).all()
+                ):
                     grid_z = gaussian_filter(grid_z, sigma=float(smooth_sigma))
                 return ax.imshow(
-                    grid_z,
+                    np.ma.masked_invalid(grid_z),
                     extent=(float(np.min(x)), float(np.max(x)), float(np.min(y)), float(np.max(y))),
                     origin="lower",
                     cmap=cmap,
                     norm=norm,
-                    interpolation="bicubic",
+                    interpolation="nearest",
                     aspect="auto",
                 )
         except Exception:
@@ -175,10 +216,10 @@ def _plot_landscape(
 
     try:
         triangulation = mtri.Triangulation(x, y)
-        return ax.tricontourf(
+        return ax.tripcolor(
             triangulation,
             values,
-            levels=levels,
+            shading="flat",
             cmap=cmap,
             norm=norm,
             antialiased=True,
@@ -195,12 +236,12 @@ def plot_phase_diagram(
     cmap=None,
     style="landscape",
     overlay_points=True,
-    point_size=22,
-    grid_resolution=300,
+    point_size=30,
+    grid_resolution=220,
     interpolation="linear",
-    levels=48,
-    fill_nearest=True,
-    smooth_sigma=1.0,
+    levels=32,
+    fill_nearest=False,
+    smooth_sigma=0.0,
     ax=None,
     save_path=None,
     show=False,
@@ -224,7 +265,7 @@ def plot_phase_diagram(
     else:
         fig = ax.figure
 
-    cmap = plt.get_cmap(_default_cmap(value_col, cmap))
+    cmap = _prepare_cmap(value_col, cmap)
     values = plot_df[value_col].astype(float)
     norm = _value_norm(values, value_col)
 
@@ -259,19 +300,22 @@ def plot_phase_diagram(
             cmap=cmap,
             norm=norm,
             s=point_size,
-            edgecolors="black" if style != "scatter" else "none",
-            linewidths=0.25 if style != "scatter" else 0.0,
-            alpha=0.6 if style != "scatter" else 1.0,
+            edgecolors="#1f2528",
+            linewidths=0.35,
+            alpha=0.82 if style != "scatter" else 0.94,
         )
         if mappable is None:
             mappable = scatter
 
-    fig.colorbar(mappable, ax=ax, label=colorbar_label)
+    fig.colorbar(mappable, ax=ax, label=colorbar_label, fraction=0.046, pad=0.04)
     ax.set_xlabel("Tx (nm)")
     ax.set_ylabel("Tz (nm)")
     ax.set_title(title)
     ax.set_xlim(*_axis_limits(x))
     ax.set_ylim(*_axis_limits(y))
+    ax.set_facecolor("#f6f7f5")
+    ax.grid(color="#d7ddd8", linewidth=0.6, alpha=0.5)
+    ax.set_axisbelow(True)
 
     fig.tight_layout()
 
