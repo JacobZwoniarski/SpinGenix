@@ -3,6 +3,7 @@ const state = {
   selectedPhaseRun: "",
   selectedAcquisition: "",
   lastPrediction: null,
+  checkpointInfoRequest: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -109,6 +110,68 @@ function checkpointRuns() {
   return (state.status?.runs || []).filter((run) => run.checkpoint);
 }
 
+function runLabel(run) {
+  return pathLabel(typeof run === "string" ? run : run?.path || "");
+}
+
+function phaseImageRank(path) {
+  const lower = String(path || "").toLowerCase();
+  if (lower.includes("phase_dataset") && lower.includes("abs")) return 0;
+  if (lower.includes("phase_dataset") && lower.includes("signed")) return 1;
+  if (lower.includes("phase_model") && lower.includes("abs")) return 2;
+  if (lower.includes("phase_model") && lower.includes("signed")) return 3;
+  if (lower.includes("abs")) return 4;
+  if (lower.includes("signed")) return 5;
+  return 9;
+}
+
+function phaseImageTitle(path) {
+  const lower = String(path || "").toLowerCase();
+  const source = lower.includes("phase_model") ? "Model" : lower.includes("phase_dataset") ? "Dataset" : "Phase";
+  const metric = lower.includes("signed") ? "MeanMz signed" : lower.includes("abs") ? "|MeanMz|" : "map";
+  return `${source} ${metric}`;
+}
+
+function sortedPhaseImages(run) {
+  return [...(run?.phase_images || [])].sort((a, b) => phaseImageRank(a) - phaseImageRank(b) || a.localeCompare(b));
+}
+
+function phaseRunScore(run) {
+  const lower = String(run?.path || "").toLowerCase();
+  let score = 0;
+  if (lower.includes("param_surrogate_h100_masked")) score += 1000000;
+  else if (lower.includes("param_surrogate_h100")) score += 650000;
+  if (lower.includes("v1_pipeline")) score += 50000;
+  if (lower.includes("active_learning")) score += 10000;
+  if (lower.includes("smoke")) score -= 200000;
+  const images = run?.phase_images || [];
+  if (images.some((path) => path.includes("phase_dataset") && path.includes("abs"))) score += 2000;
+  if (images.some((path) => path.includes("phase_model") && path.includes("abs"))) score += 1000;
+  score += images.length * 10;
+  return score;
+}
+
+function recommendedPhaseRun() {
+  const runs = phaseRuns();
+  if (!runs.length) return null;
+  return [...runs].sort((a, b) => phaseRunScore(b) - phaseRunScore(a))[0];
+}
+
+function preferredReconstructionImages(run, limit = 6) {
+  const images = run?.reconstruction_images || [];
+  const components = images.filter((path) => String(path).toLowerCase().includes("components"));
+  const rest = images.filter((path) => !String(path).toLowerCase().includes("components"));
+  return [...components, ...rest].slice(0, limit);
+}
+
+function reconstructionRun() {
+  const active = activeCheckpointRun();
+  if (preferredReconstructionImages(active, 1).length) return active;
+  const phaseRun = phaseRuns().find((run) => run.path === state.selectedPhaseRun);
+  if (preferredReconstructionImages(phaseRun, 1).length) return phaseRun;
+  return checkpointRuns().find((run) => preferredReconstructionImages(run, 1).length) || null;
+}
+
 function phaseRuns() {
   return (state.status?.runs || []).filter((run) => run.phase_images && run.phase_images.length);
 }
@@ -206,18 +269,21 @@ function selectedParamsInRange() {
 
 function renderCheckpointRange() {
   const run = activeCheckpointRun();
-  const ranges = checkpointRange(run);
+  const checkpointRanges = run?.checkpoint_info?.normalizer_range_nm;
+  const ranges = checkpointRanges || checkpointRange(run);
   const target = $("checkpointRange");
   if (!run || !ranges) {
     target.className = "range-card empty";
     target.innerHTML = "No checkpoint range available";
     return;
   }
+  const source = checkpointRanges ? "envelope" : "coverage";
+  const decoder = run.checkpoint_info?.model_config?.spatial_size || (run.checkpoint_info === null ? "loading" : 200);
   target.className = "range-card";
   target.innerHTML = `
-    <div class="range-row"><span>Tx envelope</span><strong>${formatRange(ranges.Tx)}</strong></div>
-    <div class="range-row"><span>Tz envelope</span><strong>${formatRange(ranges.Tz)}</strong></div>
-    <div class="range-row"><span>Decoder</span><strong>${escapeHtml(run.checkpoint_info?.model_config?.spatial_size || 200)} px</strong></div>
+    <div class="range-row"><span>Tx ${source}</span><strong>${formatRange(ranges.Tx)}</strong></div>
+    <div class="range-row"><span>Tz ${source}</span><strong>${formatRange(ranges.Tz)}</strong></div>
+    <div class="range-row"><span>Decoder</span><strong>${escapeHtml(decoder)}${Number.isFinite(Number(decoder)) ? " px" : ""}</strong></div>
   `;
 }
 
@@ -279,36 +345,55 @@ function renderDemoReadiness() {
   const ready = dataset?.available && dataset.fields_exists && checkpoints.length > 0;
   $("demoReadiness").textContent = ready ? "Demo ready" : "Needs artifacts";
   $("demoReadiness").className = `status-pill ${ready ? "ok" : "warn"}`;
+
+  const splits = dataset?.split_counts || {};
+  const holdout = Number(splits.test_holdout || 0) + Number(splits.boundary_holdout || 0);
   const ranges = checkpointRange();
-  $("sequenceEnvelope").textContent = ranges
-    ? `${formatRange(ranges.Tx)} / ${formatRange(ranges.Tz)}`
-    : "Pending";
+  const acquisitions = acquisitionFiles();
+  $("handoffBadge").textContent = acquisitions.length ? "AL dry-run" : "No AL file";
+  $("handoffBadge").className = `status-pill ${acquisitions.length ? "ok" : "warn"}`;
+  $("snapshotDataset").textContent = dataset?.available ? `${dataset.samples} samples` : "missing";
+  $("snapshotSplits").textContent = splits.train !== undefined
+    ? `train ${splits.train} / val ${splits.val ?? 0} / test ${splits.test_holdout ?? 0}`
+    : "splits pending";
+  $("snapshotHoldout").textContent = holdout ? `${holdout} samples` : "-";
+  $("snapshotEnvelope").textContent = ranges ? `${formatRange(ranges.Tx)} / ${formatRange(ranges.Tz)}` : "pending";
+  $("snapshotAcquisition").textContent = state.selectedAcquisition ? runLabel(state.selectedAcquisition) : "none";
 }
 
 function renderSelectors() {
   const checkpoints = checkpointRuns();
-  const recommended = recommendedCheckpoint();
+  const currentCheckpoint = $("checkpointSelect").value;
+  const recommended = checkpoints.find((run) => run.checkpoint === currentCheckpoint) || recommendedCheckpoint();
   $("checkpointSelect").innerHTML = checkpoints.length
     ? checkpoints.map((run) => {
         const selected = recommended && run.checkpoint === recommended.checkpoint ? " selected" : "";
         const summary = run.summary?.mse_mean !== undefined ? ` · mse ${formatNumber(run.summary.mse_mean, 4)}` : "";
-        return `<option value="${escapeHtml(run.checkpoint)}"${selected}>${escapeHtml(pathLabel(run.path) + summary)}</option>`;
+        return `<option value="${escapeHtml(run.checkpoint)}"${selected}>${escapeHtml(runLabel(run) + summary)}</option>`;
       }).join("")
     : `<option value="">No checkpoint found</option>`;
 
   const phases = phaseRuns();
+  const selectedPhase = phases.find((run) => run.path === state.selectedPhaseRun) || recommendedPhaseRun();
   const phaseOptions = phases.length
-    ? phases.map((run) => `<option value="${escapeHtml(run.path)}">${escapeHtml(pathLabel(run.path))}</option>`).join("")
+    ? phases.map((run) => {
+        const selected = selectedPhase && run.path === selectedPhase.path ? " selected" : "";
+        return `<option value="${escapeHtml(run.path)}"${selected}>${escapeHtml(runLabel(run))}</option>`;
+      }).join("")
     : `<option value="">No phase plots found</option>`;
   $("phaseRunSelect").innerHTML = phaseOptions;
   $("phaseRunSelectFull").innerHTML = phaseOptions;
-  state.selectedPhaseRun = $("phaseRunSelect").value;
+  state.selectedPhaseRun = selectedPhase?.path || $("phaseRunSelect").value;
 
   const acquisitions = acquisitionFiles();
+  const selectedAcquisition = acquisitions.find((item) => item.path === state.selectedAcquisition) || acquisitions[0];
   $("acquisitionSelect").innerHTML = acquisitions.length
-    ? acquisitions.map((item) => `<option value="${escapeHtml(item.path)}">${escapeHtml(pathLabel(item.path))}</option>`).join("")
+    ? acquisitions.map((item) => {
+        const selected = selectedAcquisition && item.path === selectedAcquisition.path ? " selected" : "";
+        return `<option value="${escapeHtml(item.path)}"${selected}>${escapeHtml(runLabel(item.path))}</option>`;
+      }).join("")
     : `<option value="">No acquisition CSV found</option>`;
-  state.selectedAcquisition = $("acquisitionSelect").value;
+  state.selectedAcquisition = selectedAcquisition?.path || $("acquisitionSelect").value;
 
   setRangeControls(true);
   renderCheckpointRange();
@@ -316,12 +401,9 @@ function renderSelectors() {
 }
 
 function phasePreviewPath(run) {
-  if (!run?.phase_images?.length) return null;
-  return (
-    run.phase_images.find((path) => path.includes("phase_model") && path.includes("abs")) ||
-    run.phase_images.find((path) => path.includes("phase_dataset") && path.includes("abs")) ||
-    run.phase_images[0]
-  );
+  const images = sortedPhaseImages(run);
+  if (!images.length) return null;
+  return images.find((path) => path.includes("phase_dataset") && path.includes("abs")) || images[0];
 }
 
 function renderPhase() {
@@ -332,10 +414,10 @@ function renderPhase() {
     return;
   }
 
-  $("phaseGallery").innerHTML = run.phase_images.map((path) => `
+  $("phaseGallery").innerHTML = sortedPhaseImages(run).map((path) => `
     <figure class="image-tile">
       <img src="${fileUrl(path)}" alt="${escapeHtml(path)}">
-      <figcaption>${escapeHtml(path)}</figcaption>
+      <figcaption class="phase-caption"><strong>${escapeHtml(phaseImageTitle(path))}</strong>${escapeHtml(path)}</figcaption>
     </figure>
   `).join("");
 
@@ -417,7 +499,8 @@ function renderPrediction(payload) {
   $("predictionEmpty").textContent = "";
   $("predictionDetailEmpty").textContent = "";
 
-  const label = `${formatNumber(payload.tx_nm)} nm / ${formatNumber(payload.tz_nm)} nm on ${payload.device}`;
+  const imageMode = payload.image_mode === "components" ? "Mx/My/Mz" : (payload.image_mode || "field");
+  const label = `${formatNumber(payload.tx_nm)} nm / ${formatNumber(payload.tz_nm)} nm · ${imageMode} · ${payload.device}`;
   $("predictionLabel").textContent = label;
   $("predictionDetailLabel").textContent = label;
 
@@ -433,6 +516,23 @@ function renderPrediction(payload) {
   `).join("");
 
   updateEnvelopePanels();
+}
+
+function renderReconstructions() {
+  const target = $("reconstructionGallery");
+  if (!target) return;
+  const run = reconstructionRun();
+  const images = preferredReconstructionImages(run);
+  if (!images.length) {
+    target.innerHTML = `<div class="empty-state">No reconstruction images found</div>`;
+    return;
+  }
+  target.innerHTML = images.map((path) => `
+    <figure>
+      <img src="${fileUrl(path)}" alt="${escapeHtml(path)}">
+      <figcaption>${escapeHtml(path)}</figcaption>
+    </figure>
+  `).join("");
 }
 
 function updateEnvelopePanels() {
@@ -451,6 +551,26 @@ function updateEnvelopePanels() {
     `<div class="metric-row"><span>Range status</span><strong>${inside ? "inside" : "outside"}</strong></div>`,
   ].join("") : `<div class="empty-state">No checkpoint envelope</div>`;
   renderDemoReadiness();
+  renderReconstructions();
+}
+
+async function loadCheckpointInfoForSelected() {
+  const run = activeCheckpointRun();
+  if (!run?.checkpoint || run.checkpoint_info) return;
+  const requestId = ++state.checkpointInfoRequest;
+  renderCheckpointRange();
+  try {
+    const info = await fetchJson(`/api/checkpoint-info?checkpoint=${encodeURIComponent(run.checkpoint)}`);
+    if (requestId !== state.checkpointInfoRequest) return;
+    run.checkpoint_info = info;
+    setRangeControls(false);
+    updateEnvelopePanels();
+  } catch (error) {
+    if (requestId !== state.checkpointInfoRequest) return;
+    run.checkpoint_info = { error: error.message };
+    $("checkpointRange").className = "range-card empty";
+    $("checkpointRange").innerHTML = escapeHtml(error.message);
+  }
 }
 
 async function runPrediction() {
@@ -494,6 +614,9 @@ async function refresh() {
   renderRuns();
   await renderAcquisition();
   updateEnvelopePanels();
+  loadCheckpointInfoForSelected().catch((error) => {
+    $("predictStatus").textContent = error.message;
+  });
 }
 
 function bindParamControls() {
@@ -526,6 +649,9 @@ $("refreshButton").addEventListener("click", () => refresh().catch((error) => {
 $("checkpointSelect").addEventListener("change", () => {
   setRangeControls(true);
   updateEnvelopePanels();
+  loadCheckpointInfoForSelected().catch((error) => {
+    $("predictStatus").textContent = error.message;
+  });
 });
 
 $("phaseRunSelect").addEventListener("change", (event) => {

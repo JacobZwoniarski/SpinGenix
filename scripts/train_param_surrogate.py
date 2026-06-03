@@ -137,8 +137,8 @@ def save_dataset_phase_plots(df, out_dir):
     saved = []
 
     specs = [
-        ("MeanMz_abs", "|Mean Mz|", "phase_dataset_meanmz_abs.png", "viridis"),
-        ("MeanMz_signed", "Mean Mz", "phase_dataset_meanmz_signed.png", "coolwarm"),
+        ("MeanMz_abs", "|Mean Mz|", "phase_dataset_meanmz_abs.png", "cividis"),
+        ("MeanMz_signed", "Mean Mz", "phase_dataset_meanmz_signed.png", "RdBu_r"),
     ]
     for value_col, colorbar_label, filename, cmap in specs:
         if value_col not in df.columns:
@@ -387,8 +387,8 @@ def save_model_phase_plots(model, normalizer, out_dir, device, grid_points, batc
 
     saved = [meta_path]
     specs = [
-        ("MeanMz_abs", "Predicted |Mean Mz|", "phase_model_meanmz_abs.png", "viridis"),
-        ("MeanMz_signed", "Predicted Mean Mz", "phase_model_meanmz_signed.png", "coolwarm"),
+        ("MeanMz_abs", "Predicted |Mean Mz|", "phase_model_meanmz_abs.png", "cividis"),
+        ("MeanMz_signed", "Predicted Mean Mz", "phase_model_meanmz_signed.png", "RdBu_r"),
     ]
     for value_col, colorbar_label, filename, cmap in specs:
         fig, _ = plot_phase_diagram(
