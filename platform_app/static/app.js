@@ -16,8 +16,12 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+function appUrl(path) {
+  return new URL(path.replace(/^\/+/, ""), window.location.href).toString();
+}
+
 function fileUrl(path) {
-  return `/api/file?path=${encodeURIComponent(path)}`;
+  return appUrl(`api/file?path=${encodeURIComponent(path)}`);
 }
 
 function formatNumber(value, digits = 3) {
@@ -560,7 +564,7 @@ async function loadCheckpointInfoForSelected() {
   const requestId = ++state.checkpointInfoRequest;
   renderCheckpointRange();
   try {
-    const info = await fetchJson(`/api/checkpoint-info?checkpoint=${encodeURIComponent(run.checkpoint)}`);
+    const info = await fetchJson(appUrl(`api/checkpoint-info?checkpoint=${encodeURIComponent(run.checkpoint)}`));
     if (requestId !== state.checkpointInfoRequest) return;
     run.checkpoint_info = info;
     setRangeControls(false);
@@ -585,7 +589,7 @@ async function runPrediction() {
   $("predictButton").disabled = true;
   $("predictStatus").textContent = "Generating";
   try {
-    const payload = await fetchJson(`/api/predict?${params.toString()}`);
+    const payload = await fetchJson(appUrl(`api/predict?${params.toString()}`));
     renderPrediction(payload);
     $("predictStatus").textContent = payload.warnings?.length ? "Prediction with warning" : "Prediction ready";
     showView("demo");
@@ -607,7 +611,7 @@ function showView(viewId) {
 
 async function refresh() {
   $("datasetBadge").textContent = "Loading";
-  state.status = await fetchJson("/api/status");
+  state.status = await fetchJson(appUrl("api/status"));
   renderOverview();
   renderSelectors();
   renderPhase();
