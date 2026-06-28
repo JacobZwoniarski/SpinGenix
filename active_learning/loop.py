@@ -1,9 +1,12 @@
 import os
+import json
+import shutil
 import time
 import torch
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from torch.utils.data import Subset
 
 from .dataset import MagnetizationDataset
@@ -54,6 +57,7 @@ class ActiveLearningLoop:
         results_dir="results/",
         registry_path="data/registry",
         normalizer_path=None,
+        checkpoint_dir=None,
         simulations_dir="/mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/",
         # AL PARAMS
         Tx_range=(10e-9, 100e-9),
@@ -76,6 +80,8 @@ class ActiveLearningLoop:
         lr=1e-4,
         device="cuda",
         param_columns=PARAM_COLUMNS_V1,
+        save_checkpoints=True,
+        checkpoint_every_epoch=False,
     ):
         self.meta_path = meta_path
         self.fields_path = fields_path
@@ -85,8 +91,11 @@ class ActiveLearningLoop:
         self.results_dir = results_dir
         self.registry_path = registry_path
         self.normalizer_path = normalizer_path or os.path.join(dataset_dir, "param_normalizer.json")
+        self.checkpoint_dir = checkpoint_dir or os.path.join(results_dir, "checkpoints")
         self.simulations_dir = simulations_dir
         self.param_columns = tuple(param_columns)
+        self.save_checkpoints = bool(save_checkpoints)
+        self.checkpoint_every_epoch = bool(checkpoint_every_epoch)
 
         # AL settings
         self.Tx_range = Tx_range
@@ -186,6 +195,122 @@ class ActiveLearningLoop:
             return
         _, paths = upsert_registry(rows, registry_dir=self.registry_path)
         self.log(f"[AL] Registry updated: {paths['csv']}")
+
+    def checkpoint_metadata(self, *, model, dataset, iteration, epoch, loss, stage):
+        split_counts = {}
+        if hasattr(dataset, "df") and "split" in dataset.df.columns:
+            split_counts = {
+                str(key): int(value)
+                for key, value in dataset.df["split"].fillna("<missing>").value_counts().items()
+            }
+
+        normalizer = getattr(dataset, "param_normalizer", None)
+        normalizer_payload = None
+        if normalizer is not None:
+            try:
+                normalizer_payload = normalizer.to_dict()
+            except RuntimeError:
+                normalizer_payload = None
+
+        return {
+            "schema_version": 1,
+            "created_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            "stage": stage,
+            "iteration": int(iteration),
+            "epoch": None if epoch is None else int(epoch),
+            "loss": None if loss is None else float(loss),
+            "model": {
+                "class": model.__class__.__name__,
+                "spatial_size": getattr(model, "spatial_size", None),
+                "latent_dim": getattr(model, "latent_dim", None),
+                "cond_dim": getattr(model, "cond_dim", None),
+            },
+            "training": {
+                "epochs": int(self.epochs),
+                "batch_size": int(self.batch_size),
+                "lr": float(self.lr),
+                "device": str(self.device),
+            },
+            "active_learning": {
+                "Tx_range": [float(self.Tx_range[0]), float(self.Tx_range[1])],
+                "Tz_range": [float(self.Tz_range[0]), float(self.Tz_range[1])],
+                "grid_points": int(self.grid_points),
+                "k_new": int(self.k_new),
+                "max_submit": None if self.max_submit is None else int(self.max_submit),
+                "mc_samples": int(self.mc_samples),
+                "acquisition_min_distance": self.acquisition_min_distance,
+                "param_columns": list(self.param_columns),
+            },
+            "paths": {
+                "meta_path": self.meta_path,
+                "fields_path": self.fields_path,
+                "dataset_dir": self.dataset_dir,
+                "registry_path": self.registry_path,
+                "normalizer_path": self.normalizer_path,
+                "results_dir": self.results_dir,
+                "simulations_dir": self.simulations_dir,
+                "simulation_prefix": self.simulation_prefix,
+            },
+            "dataset": {
+                "samples": int(len(dataset)) if hasattr(dataset, "__len__") else None,
+                "split_counts": split_counts,
+                "param_normalizer": normalizer_payload,
+            },
+        }
+
+    @staticmethod
+    def checkpoint_rng_state():
+        state = {
+            "torch_cpu": torch.get_rng_state(),
+            "numpy": np.random.get_state(),
+        }
+        if torch.cuda.is_available():
+            state["torch_cuda_all"] = torch.cuda.get_rng_state_all()
+        return state
+
+    def save_model_checkpoint(self, *, model, optimizer, dataset, iteration, epoch, loss, stage):
+        if not self.save_checkpoints:
+            return None
+
+        checkpoint_dir = Path(self.checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        epoch_part = "final" if epoch is None else f"epoch_{int(epoch):03d}"
+        stem = f"iter_{int(iteration):03d}_{epoch_part}_{stage}"
+        checkpoint_path = checkpoint_dir / f"{stem}.pt"
+        metadata_path = checkpoint_dir / f"{stem}.json"
+        latest_path = checkpoint_dir / "latest.pt"
+        latest_metadata_path = checkpoint_dir / "latest.json"
+
+        metadata = self.checkpoint_metadata(
+            model=model,
+            dataset=dataset,
+            iteration=iteration,
+            epoch=epoch,
+            loss=loss,
+            stage=stage,
+        )
+        payload = {
+            "metadata": metadata,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": (
+                optimizer.state_dict()
+                if hasattr(optimizer, "state_dict")
+                else optimizer
+            ),
+            "rng_state": self.checkpoint_rng_state(),
+        }
+
+        tmp_checkpoint = checkpoint_path.with_suffix(".pt.tmp")
+        tmp_metadata = metadata_path.with_suffix(".json.tmp")
+        torch.save(payload, tmp_checkpoint)
+        with open(tmp_metadata, "w", encoding="utf-8") as handle:
+            json.dump(metadata, handle, indent=2, sort_keys=True)
+        os.replace(tmp_checkpoint, checkpoint_path)
+        os.replace(tmp_metadata, metadata_path)
+        shutil.copy2(checkpoint_path, latest_path)
+        shutil.copy2(metadata_path, latest_metadata_path)
+        self.log(f"[AL] Checkpoint saved: {checkpoint_path}")
+        return str(checkpoint_path)
 
     def training_subset(self, dataset):
         if "split" not in dataset.df.columns:
@@ -388,13 +513,35 @@ class ActiveLearningLoop:
             # 2. Train model
             model = UNetCVAE(spatial_size=200)
             train_dataset = self.training_subset(dataset)
+            def checkpoint_callback(model, optimizer, epoch, loss):
+                if self.checkpoint_every_epoch:
+                    self.save_model_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        dataset=dataset,
+                        iteration=it + 1,
+                        epoch=epoch,
+                        loss=loss,
+                        stage="epoch",
+                    )
+
             model = train_cvae(
                 model,
                 train_dataset,
                 epochs=self.epochs,
                 batch_size=self.batch_size,
                 lr=self.lr,
-                device=self.device
+                device=self.device,
+                checkpoint_callback=checkpoint_callback,
+            )
+            self.save_model_checkpoint(
+                model=model,
+                optimizer=getattr(model, "_last_optimizer_state_dict", None),
+                dataset=dataset,
+                iteration=it + 1,
+                epoch=self.epochs,
+                loss=getattr(model, "_last_epoch_loss", None),
+                stage="final",
             )
 
             # ------------------------------------------------------

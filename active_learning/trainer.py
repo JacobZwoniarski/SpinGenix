@@ -50,7 +50,8 @@ def train_cvae(
     wx=1.0,
     wy=1.0,
     wz=2.0,
-    device="cuda"
+    device="cuda",
+    checkpoint_callback=None,
 ):
     # Move model to GPU
     model = model.to(device)
@@ -93,6 +94,16 @@ def train_cvae(
             total_loss += loss.item()
             pbar.set_postfix({"loss": total_loss / (len(pbar) + 1)})
 
-        print(f"[Epoch {epoch+1}] loss = {total_loss / len(loader):.6f}")
+        epoch_loss = total_loss / len(loader)
+        print(f"[Epoch {epoch+1}] loss = {epoch_loss:.6f}", flush=True)
+        model._last_epoch_loss = epoch_loss
+        if checkpoint_callback is not None:
+            checkpoint_callback(
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch + 1,
+                loss=epoch_loss,
+            )
 
+    model._last_optimizer_state_dict = optimizer.state_dict()
     return model

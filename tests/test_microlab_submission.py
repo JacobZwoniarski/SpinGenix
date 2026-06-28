@@ -61,6 +61,82 @@ def test_read_registry_falls_back_to_csv_when_parquet_engine_missing(monkeypatch
     assert registry.loc[0, "Tx_val"] == pytest.approx(1e-8)
 
 
+def test_active_learning_checkpoint_writes_model_optimizer_and_metadata(tmp_path):
+    import pandas as pd
+    import torch
+
+    from active_learning.loop import ActiveLearningLoop
+    from active_learning.normalization import ParamNormalizer
+
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+    class FakeDataset:
+        df = pd.DataFrame({
+            "split": ["train", "val"],
+            "Tx_val": [1e-8, 2e-8],
+            "Tz_val": [3e-8, 4e-8],
+        })
+        param_normalizer = ParamNormalizer.fit_dataframe(df)
+
+        def __len__(self):
+            return len(self.df)
+
+    loop = ActiveLearningLoop.__new__(ActiveLearningLoop)
+    loop.meta_path = "data/dataset/meta.h5"
+    loop.fields_path = "data/dataset/fields.npz"
+    loop.dataset_dir = "data/dataset"
+    loop.registry_path = "data/registry"
+    loop.normalizer_path = "data/dataset/param_normalizer.json"
+    loop.results_dir = str(tmp_path / "results")
+    loop.checkpoint_dir = str(tmp_path / "checkpoints")
+    loop.simulations_dir = str(tmp_path / "simulations")
+    loop.simulation_prefix = "vxAL"
+    loop.Tx_range = (1e-8, 1.1e-7)
+    loop.Tz_range = (1e-8, 1.1e-7)
+    loop.grid_points = 40
+    loop.k_new = 4
+    loop.max_submit = 4
+    loop.mc_samples = 10
+    loop.acquisition_min_distance = 2e-9
+    loop.param_columns = ("Tx_val", "Tz_val")
+    loop.epochs = 20
+    loop.batch_size = 8
+    loop.lr = 1e-4
+    loop.device = "cpu"
+    loop.save_checkpoints = True
+
+    checkpoint_path = loop.save_model_checkpoint(
+        model=model,
+        optimizer=optimizer,
+        dataset=FakeDataset(),
+        iteration=2,
+        epoch=7,
+        loss=0.123,
+        stage="epoch",
+    )
+
+    checkpoint_path = Path(checkpoint_path)
+    metadata_path = checkpoint_path.with_suffix(".json")
+    latest_path = checkpoint_path.parent / "latest.pt"
+    latest_metadata_path = checkpoint_path.parent / "latest.json"
+
+    assert checkpoint_path.exists()
+    assert metadata_path.exists()
+    assert latest_path.exists()
+    assert latest_metadata_path.exists()
+
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    assert payload["model_state_dict"]
+    assert payload["optimizer_state_dict"]
+    assert payload["metadata"]["iteration"] == 2
+    assert payload["metadata"]["epoch"] == 7
+    assert payload["metadata"]["loss"] == pytest.approx(0.123)
+    assert payload["metadata"]["dataset"]["samples"] == 2
+    assert payload["metadata"]["dataset"]["split_counts"] == {"train": 1, "val": 1}
+    assert payload["metadata"]["dataset"]["param_normalizer"]["param_columns"] == ["Tx_val", "Tz_val"]
+
+
 def test_microlab_backend_builds_task_payload_from_env_token(monkeypatch, tmp_path):
     from simulations.backends import MicrolabSubmissionBackend, SlurmResources, SimulationArtifact
 

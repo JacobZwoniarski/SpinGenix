@@ -81,6 +81,21 @@ def parse_args(argv=None):
     parser.add_argument("--registry-dir", default="data/registry")
     parser.add_argument("--results-dir", default="results/active_learning")
     parser.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="Directory for model checkpoints. Defaults to <results-dir>/checkpoints.",
+    )
+    parser.add_argument(
+        "--no-checkpoints",
+        action="store_true",
+        help="Disable model checkpoint writing.",
+    )
+    parser.add_argument(
+        "--checkpoint-every-epoch",
+        action="store_true",
+        help="Also save a checkpoint after every training epoch, not only after each AL iteration.",
+    )
+    parser.add_argument(
         "--simulations-dir",
         default=os.environ.get("SPINGENX_SIMULATIONS_DIR", DEFAULT_SPINGENX_REMOTE_ROOT),
     )
@@ -202,6 +217,7 @@ def main(argv=None, *, transport=None):
         results_dir=args.results_dir,
         registry_path=args.registry_dir,
         normalizer_path=args.normalizer_path,
+        checkpoint_dir=args.checkpoint_dir,
         simulations_dir=args.simulations_dir,
         Tx_range=nm_range(args.tx_min_nm, args.tx_max_nm),
         Tz_range=nm_range(args.tz_min_nm, args.tz_max_nm),
@@ -221,6 +237,8 @@ def main(argv=None, *, transport=None):
         batch_size=args.batch_size,
         lr=args.lr,
         device=device,
+        save_checkpoints=not args.no_checkpoints,
+        checkpoint_every_epoch=args.checkpoint_every_epoch,
     )
     al.run(iterations=args.iterations)
     return None
