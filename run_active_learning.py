@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import sys
 import tempfile
@@ -12,16 +13,23 @@ if str(ROOT) not in sys.path:
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(tempfile.gettempdir(), "matplotlib-spingenix"))
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
-import torch  # noqa: E402
+from simulations.backends import SlurmResources, create_submission_backend  # noqa: E402
 
-from active_learning.loop import ActiveLearningLoop  # noqa: E402
+
+DEFAULT_MICROLAB_PROJECT_ID = 24
+DEFAULT_MICROLAB_PROJECT_URL = "https://amucontainers.orion.zfns.eu.org/dashboard/projects/24"
+DEFAULT_MICROLAB_API_BASE = "https://amucontainers.orion.zfns.eu.org/api/v1"
+DEFAULT_SPINGENX_REMOTE_ROOT = (
+    "/mnt/storage_6/project_data/pl0095-01/mateuszz/microlab/projects/"
+    "24_spingenx/workspace/scratch/SpinGenx_remote"
+)
 
 
 def nm_range(min_nm, max_nm):
     return (float(min_nm) * 1e-9, float(max_nm) * 1e-9)
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Run the SpinGenix active-learning loop."
     )
@@ -36,6 +44,11 @@ def parse_args():
         action="store_true",
         help="Submit selected points to Slurm, wait for completed zarr outputs, and append them to the dataset.",
     )
+    mode.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Check MicroLab CLI auth/API/project configuration without training or creating tasks.",
+    )
 
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=20)
@@ -45,6 +58,12 @@ def parse_args():
 
     parser.add_argument("--grid-points", type=int, default=40)
     parser.add_argument("--k-new", type=int, default=20)
+    parser.add_argument(
+        "--max-submit",
+        type=int,
+        default=None,
+        help="Maximum new points to submit per active-learning iteration.",
+    )
     parser.add_argument("--mc-samples", type=int, default=10)
     parser.add_argument("--tx-min-nm", type=float, default=10.0)
     parser.add_argument("--tx-max-nm", type=float, default=110.0)
@@ -60,7 +79,7 @@ def parse_args():
     parser.add_argument("--results-dir", default="results/active_learning")
     parser.add_argument(
         "--simulations-dir",
-        default="/mnt/storage_5/scratch/pl0095-01/jakzwo/simulations/",
+        default=os.environ.get("SPINGENX_SIMULATIONS_DIR", DEFAULT_SPINGENX_REMOTE_ROOT),
     )
     parser.add_argument("--simulation-prefix", default="vxAL")
 
@@ -69,11 +88,94 @@ def parse_args():
     parser.add_argument("--amumax-bin", default=None)
     parser.add_argument("--cuda-module", default=None)
 
-    return parser.parse_args()
+    parser.add_argument(
+        "--submission-backend",
+        default="local-sbatch",
+        choices=["local-sbatch", "amucontainers", "dry-run"],
+        help="Where to submit prepared .mx3 files.",
+    )
+    parser.add_argument(
+        "--microlab-api-base",
+        default=os.environ.get("MICROLAB_API_BASE", DEFAULT_MICROLAB_API_BASE),
+        help="MicroLab API base URL, for example https://host/api/v1.",
+    )
+    parser.add_argument(
+        "--microlab-token-env",
+        default="MICROLAB_CLI_TOKEN",
+        help="Environment variable containing the MicroLab CLI token.",
+    )
+    parser.add_argument(
+        "--project-id",
+        type=int,
+        default=int(os.environ.get("SPINGENX_MICROLAB_PROJECT_ID", DEFAULT_MICROLAB_PROJECT_ID)),
+        help=(
+            "MicroLab project id for submitted tasks. "
+            f"Defaults to SpinGenX project {DEFAULT_MICROLAB_PROJECT_ID}: "
+            f"{DEFAULT_MICROLAB_PROJECT_URL}"
+        ),
+    )
+    parser.add_argument("--task-partition", default="proxima")
+    parser.add_argument("--task-num-cpus", type=int, default=3)
+    parser.add_argument("--task-memory-gb", type=int, default=12)
+    parser.add_argument("--task-num-gpus", type=int, default=1)
+    parser.add_argument("--task-time-limit", default="24:00:00")
+    parser.add_argument("--task-priority", type=int, default=0)
+    parser.add_argument("--amumax-version-id", default="default")
+    parser.add_argument(
+        "--submission-manifest",
+        default=None,
+        help=(
+            "JSON manifest used to avoid duplicate MicroLab submissions. "
+            "Defaults to <results-dir>/submissions/submission_manifest.json."
+        ),
+    )
+
+    args = parser.parse_args(argv)
+    if args.submission_manifest is None:
+        args.submission_manifest = os.path.join(
+            args.results_dir,
+            "submissions",
+            "submission_manifest.json",
+        )
+
+    return args
 
 
-def main():
-    args = parse_args()
+def build_submission_backend(args, *, transport=None):
+    resources = SlurmResources(
+        partition=args.task_partition,
+        num_cpus=args.task_num_cpus,
+        memory_gb=args.task_memory_gb,
+        num_gpus=args.task_num_gpus,
+        time_limit=args.task_time_limit,
+        priority=args.task_priority,
+        amumax_version_id=args.amumax_version_id,
+    )
+    return create_submission_backend(
+        args.submission_backend,
+        microlab_api_base=args.microlab_api_base,
+        microlab_token_env=args.microlab_token_env,
+        project_id=args.project_id,
+        resources=resources,
+        manifest_path=args.submission_manifest,
+        transport=transport,
+    )
+
+
+def main(argv=None, *, transport=None):
+    args = parse_args(argv)
+    submission_backend = build_submission_backend(args, transport=transport)
+
+    if args.preflight_only:
+        if submission_backend is None or not hasattr(submission_backend, "preflight"):
+            raise ValueError("--preflight-only requires --submission-backend amucontainers")
+        result = submission_backend.preflight()
+        print(json.dumps(result, indent=2, sort_keys=True), flush=True)
+        return result
+
+    import torch  # noqa: WPS433
+    from active_learning.loop import ActiveLearningLoop  # noqa: WPS433
+
     device = args.device
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -102,6 +204,7 @@ def main():
         Tz_range=nm_range(args.tz_min_nm, args.tz_max_nm),
         grid_points=args.grid_points,
         k_new=args.k_new,
+        max_submit=args.max_submit,
         mc_samples=args.mc_samples,
         acquisition_min_distance=acquisition_min_distance,
         poll_interval=args.poll_interval,
@@ -110,12 +213,14 @@ def main():
         simulation_prefix=args.simulation_prefix,
         amumax_bin=args.amumax_bin,
         cuda_module=args.cuda_module,
+        submission_backend=submission_backend,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         device=device,
     )
     al.run(iterations=args.iterations)
+    return None
 
 
 if __name__ == "__main__":

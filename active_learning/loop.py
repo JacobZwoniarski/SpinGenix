@@ -25,7 +25,6 @@ from .phase_diagram import predict_phase_mz, plot_phase_diagram, plot_dataset_ph
 
 # External modules
 from simulations.swapper import SimulationManager
-from postprocess.preprocess import preprocess_simulation
 
 import matplotlib.pyplot as plt
 
@@ -61,6 +60,7 @@ class ActiveLearningLoop:
         Tz_range=(10e-9, 100e-9),
         grid_points=40,
         k_new=20,
+        max_submit=None,
         mc_samples=10,
         acquisition_min_distance=None,
         poll_interval=300,
@@ -69,6 +69,7 @@ class ActiveLearningLoop:
         simulation_prefix="vxAL",
         amumax_bin=None,
         cuda_module=None,
+        submission_backend=None,
         # TRAINING PARAMS
         epochs=20,
         batch_size=8,
@@ -92,6 +93,7 @@ class ActiveLearningLoop:
         self.Tz_range = Tz_range
         self.grid_points = grid_points
         self.k_new = k_new
+        self.max_submit = max_submit
         self.mc_samples = mc_samples
         self.acquisition_min_distance = acquisition_min_distance
         self.poll_interval = poll_interval
@@ -112,6 +114,7 @@ class ActiveLearningLoop:
             prefix=simulation_prefix,
             amumax_bin=amumax_bin,
             cuda_module=cuda_module,
+            submission_backend=submission_backend,
         )
 
     # ---------------------------------------------------------------
@@ -132,6 +135,12 @@ class ActiveLearningLoop:
         if isinstance(value, (int, float, np.integer, np.floating)):
             return format(float(value), ".5g")
         return str(value)
+
+    def limit_selected_points(self, tx_values, tz_values):
+        if self.max_submit is None:
+            return tx_values, tz_values
+        limit = max(0, int(self.max_submit))
+        return tx_values[:limit], tz_values[:limit]
 
     def wait_for_simulations(self, expected_paths):
         start = time.time()
@@ -198,10 +207,35 @@ class ActiveLearningLoop:
         )
         return Subset(dataset, train_idx)
 
-    def registry_rows_for_points(self, tx_values, tz_values, zarr_paths, status, iteration, field_keys=None):
+    def registry_rows_for_points(
+        self,
+        tx_values,
+        tz_values,
+        zarr_paths,
+        status,
+        iteration,
+        field_keys=None,
+        submission_records=None,
+    ):
         rows = []
         field_keys = field_keys or [None] * len(zarr_paths)
-        for Tx, Tz, zarr_path, field_key in zip(tx_values, tz_values, zarr_paths, field_keys):
+        submission_records = submission_records or [None] * len(zarr_paths)
+        for Tx, Tz, zarr_path, field_key, submission_record in zip(
+            tx_values,
+            tz_values,
+            zarr_paths,
+            field_keys,
+            submission_records,
+        ):
+            extra = None
+            if submission_record is not None:
+                extra = {
+                    "submission_backend": submission_record.backend,
+                    "microlab_task_id": "" if submission_record.task_id is None else submission_record.task_id,
+                    "slurm_job_id": submission_record.slurm_job_id or "",
+                    "task_status": submission_record.status,
+                    "output_dir": submission_record.output_dir or "",
+                }
             rows.append(make_registry_row(
                 params={"Tx_val": Tx, "Tz_val": Tz},
                 prefix=self.sim_manager.prefix,
@@ -213,8 +247,21 @@ class ActiveLearningLoop:
                 zarr_path=zarr_path,
                 field_path=self.fields_path if status == "done" else None,
                 field_key=field_key,
+                extra=extra,
             ))
         return rows
+
+    def wait_for_submission_records(self, submission_records):
+        backend = getattr(self.sim_manager, "submission_backend", None)
+        if not submission_records or backend is None or not hasattr(backend, "wait_for_records"):
+            return True
+
+        self.log(f"[AL] Waiting for {len(submission_records)} MicroLab task(s)...")
+        return backend.wait_for_records(
+            submission_records,
+            poll_interval=self.poll_interval,
+            max_wait_hours=self.max_wait_hours,
+        )
 
     def save_acquisition(self, iteration, tx_values, tz_values, expected_paths, dry_run=False):
         out_dir = os.path.join(self.results_dir, "acquisition")
@@ -395,6 +442,7 @@ class ActiveLearningLoop:
                 excluded_hashes=registry_hashes,
                 param_columns=self.param_columns,
             )
+            new_Tx, new_Tz = self.limit_selected_points(new_Tx, new_Tz)
             self.log(f"[AL] Selected {len(new_Tx)} new points for iteration {it+1}.")
 
             # 5. Submit simulations
@@ -426,7 +474,7 @@ class ActiveLearningLoop:
                 continue
 
             self.log("[AL] Submitting new simulations to HPC...")
-            self.sim_manager.submit_all_simulations(
+            submission_records = self.sim_manager.submit_all_simulations(
                 params,
                 last_param_name="Tz",
                 pairs=True,
@@ -438,14 +486,20 @@ class ActiveLearningLoop:
                 expected_paths,
                 status="submitted",
                 iteration=it + 1,
+                submission_records=submission_records,
             ))
 
             # 6. Wait
+            if not self.wait_for_submission_records(submission_records):
+                raise TimeoutError("Timed out waiting for MicroLab task completion.")
+
             if not self.wait_for_simulations(expected_paths):
                 raise TimeoutError("Timed out waiting for active-learning simulations.")
 
             # 7. Preprocess results
             self.log("[AL] Preprocessing new results...")
+            from postprocess.preprocess import preprocess_simulation
+
             done_registry_rows = []
             for zarr_path in expected_paths:
                 field, (Tx, Tz), metadata = preprocess_simulation(zarr_path)

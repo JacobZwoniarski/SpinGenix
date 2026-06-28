@@ -9,6 +9,8 @@ import zarr
 import logging
 from typing import Optional, Dict, List, Union
 import time
+
+from simulations.backends import SimulationArtifact
  
 # Configure logging with rich integration
 from rich.logging import RichHandler
@@ -41,6 +43,7 @@ class SimulationManager:
         amumax_bin: Optional[str] = None,
         cuda_module: Optional[str] = None,
         use_bad_nodes: Optional[bool] = None,
+        submission_backend: Optional[object] = None,
     ) -> None:
         self.main_path = os.path.join(main_path, "")
         self.destination_path = os.path.join(destination_path, "")
@@ -62,6 +65,7 @@ class SimulationManager:
                 "yes",
             }
         self.use_bad_nodes = use_bad_nodes
+        self.submission_backend = submission_backend
 
     def validate_amumax_binary(self) -> None:
         if not os.path.exists(self.amumax_bin):
@@ -165,7 +169,7 @@ class SimulationManager:
     def submit_python_code(self, code_to_execute: str, last_param_name: Optional[str] = None,
                            cleanup: bool = False, sbatch: bool = True, check: bool = False,
                            force: bool = False, full_name: bool = False,
-                           **kwargs: Union[str, float, int]) -> None:
+                           **kwargs: Union[str, float, int]):
         """
         Submit a Python simulation based on provided parameters.
         Zmodyfikowana tak, aby wszystkie komunikaty na końcu łączyć w jeden raport.
@@ -180,28 +184,32 @@ class SimulationManager:
         # -----------------------------
         # 2. Przygotowanie nazw i ścieżek
         # -----------------------------
-        if len(kwargs) > 0 and last_param_name is None:
-            last_param_name = list(kwargs.keys())[-1]
+        working_kwargs = dict(kwargs)
+        if len(working_kwargs) > 0 and last_param_name is None:
+            last_param_name = list(working_kwargs.keys())[-1]
  
         sim_params = '_'.join([
             f"{key}_{format(val, '.5g') if isinstance(val, (int, float)) else val}"
-            for key, val in kwargs.items()
+            for key, val in working_kwargs.items()
             if key not in [last_param_name, "i", "prefix"]
         ])
  
         par_sep = ","
         val_sep = "_"
         path = (
-            f"{self.main_path}{kwargs['prefix']}/" +
+            f"{self.main_path}{working_kwargs['prefix']}/" +
             '/'.join([
                 f"{key}{val_sep}{format(val, '.5g') if isinstance(val, (int, float)) else val}"
-                for key, val in kwargs.items()
+                for key, val in working_kwargs.items()
                 if key not in [last_param_name, "i", "prefix"]
             ]) + "/"
         )
  
         # Wyjmujemy ostatni klucz/wartość jako klucz parametru
-        last_key, last_val = kwargs.popitem()
+        if last_param_name is not None and last_param_name in working_kwargs:
+            last_key, last_val = last_param_name, working_kwargs[last_param_name]
+        else:
+            last_key, last_val = next(reversed(working_kwargs.items()))
         sim_name = f"{last_key}{val_sep}{format(last_val, '.5g')}"
  
         # Informacja początkowa
@@ -215,6 +223,7 @@ class SimulationManager:
         zarr_path = f"{path}{sim_name}.zarr"
         new_file_path = f"{path}{sim_name}.mx3.tmp"
         existing_file_path = f"{path}{sim_name}.mx3"
+        submission_record = None
  
         # -----------------------------
         # 3. Logika sprawdzania plików statusu
@@ -278,9 +287,26 @@ class SimulationManager:
             os.rename(new_file_path, existing_file_path)
  
             # Uruchomienie (o ile sbatch == True)
-            if sbatch:
+            if self.submission_backend is not None:
+                artifact = SimulationArtifact(
+                    name=sim_name,
+                    mx3_path=existing_file_path,
+                    zarr_path=zarr_path,
+                    prefix=str(working_kwargs["prefix"]),
+                    params={
+                        key: value
+                        for key, value in working_kwargs.items()
+                        if key not in {"prefix", "i"}
+                    },
+                    iteration=working_kwargs.get("i"),
+                )
+                submission_record = self.submission_backend.submit(artifact)
+                sim_status_str = (
+                    f"{sim_status_str} => submitted via {submission_record.backend}"
+                )
+            elif sbatch:
                 self.validate_amumax_binary()
-                sim_sbatch_path = f"{self.main_path}{kwargs['prefix']}/sbatch/{sim_name}.sb"
+                sim_sbatch_path = f"{self.main_path}{working_kwargs['prefix']}/sbatch/{sim_name}.sb"
                 self.create_path_if_not_exists(sim_sbatch_path)
                 with open(sim_sbatch_path, "w") as f:
                     f.write(self.gen_sbatch_script(sim_name, path + sim_name))
@@ -305,6 +331,7 @@ class SimulationManager:
             log.warning(report_message)
         else:
             log.info(report_message)
+        return submission_record
         # Koniec funkcji
  
     def gen_sbatch_script(self, name: str, path: str) -> str:
@@ -426,7 +453,7 @@ fi
                                cleanup: bool = False,
                                check: bool = False,
                                force: bool = False,
-                               pairs: bool = False) -> None:
+                               pairs: bool = False):
         """Submit all simulations based on parameter combinations.
        
         If pairs=False (default), generates all combinations using itertools.product.
@@ -448,6 +475,7 @@ fi
             # Original behavior - compute Cartesian product
             value_sets = itertools.product(*params.values())
            
+        submission_records = []
         for i, values in enumerate(value_sets):
             if i < minsim:
                 continue
@@ -461,7 +489,7 @@ fi
            
             time.sleep(1)
  
-            self.submit_python_code(
+            record = self.submit_python_code(
                 self.raw_code(**kwargs),
                 last_param_name=last_param_name,
                 sbatch=sbatch,
@@ -470,6 +498,8 @@ fi
                 force=force,
                 **kwargs
             )
+            submission_records.append(record)
+        return submission_records
  
  
 # -----------------------
