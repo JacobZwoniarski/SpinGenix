@@ -1,4 +1,5 @@
 # Pliki danych
+vxAL*/
 data/
 models/
 experiments/
@@ -17,6 +18,8 @@ slurm-*.out
 
 # Pliki środowiskowe
 .env
+.env.*
+!.env.example
 .venv/
 .venv_sg/
 env/

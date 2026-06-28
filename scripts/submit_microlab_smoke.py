@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from microlab_env import load_env_file  # noqa: E402
+
 from run_active_learning import (  # noqa: E402
     DEFAULT_MICROLAB_API_BASE,
     DEFAULT_MICROLAB_PROJECT_ID,
@@ -20,6 +22,7 @@ from simulations.swapper import SimulationManager  # noqa: E402
 
 
 def parse_args(argv=None):
+    load_env_file()
     parser = argparse.ArgumentParser(
         description="Generate one SpinGenX .mx3 file and submit it to MicroLab."
     )

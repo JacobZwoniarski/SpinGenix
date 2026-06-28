@@ -10,6 +10,57 @@ import pytest
 from simulations.swapper import SimulationManager
 
 
+@pytest.fixture(autouse=True)
+def isolate_local_env_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("SPINGENX_ENV_FILE", str(tmp_path / "missing.env"))
+
+
+def test_load_env_file_reads_local_file_without_overriding(monkeypatch, tmp_path):
+    from microlab_env import load_env_file
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join([
+            "# local MicroLab credentials",
+            "export MICROLAB_CLI_TOKEN='from-file'",
+            "MICROLAB_API_BASE=https://from-file.example/api/v1",
+        ])
+    )
+
+    monkeypatch.delenv("MICROLAB_CLI_TOKEN", raising=False)
+    monkeypatch.setenv("MICROLAB_API_BASE", "https://already-set.example/api/v1")
+
+    assert load_env_file(env_file)
+    assert os.environ["MICROLAB_CLI_TOKEN"] == "from-file"
+    assert os.environ["MICROLAB_API_BASE"] == "https://already-set.example/api/v1"
+
+    assert load_env_file(env_file, override=True)
+    assert os.environ["MICROLAB_API_BASE"] == "https://from-file.example/api/v1"
+
+
+def test_read_registry_falls_back_to_csv_when_parquet_engine_missing(monkeypatch, tmp_path):
+    import pandas as pd
+
+    from active_learning.registry import read_registry
+
+    registry_dir = tmp_path / "registry"
+    registry_dir.mkdir()
+    (registry_dir / "simulations.parquet").write_text("placeholder")
+    (registry_dir / "simulations.csv").write_text(
+        "simulation_id,Tx_val,Tz_val\nsim-1,1e-8,2e-8\n"
+    )
+
+    def fail_read_parquet(path):
+        raise ImportError("Missing optional dependency 'pyarrow'")
+
+    monkeypatch.setattr(pd, "read_parquet", fail_read_parquet)
+
+    registry = read_registry(registry_dir)
+
+    assert registry.loc[0, "simulation_id"] == "sim-1"
+    assert registry.loc[0, "Tx_val"] == pytest.approx(1e-8)
+
+
 def test_microlab_backend_builds_task_payload_from_env_token(monkeypatch, tmp_path):
     from simulations.backends import MicrolabSubmissionBackend, SlurmResources, SimulationArtifact
 

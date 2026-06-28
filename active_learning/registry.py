@@ -140,14 +140,21 @@ def registry_file_candidates(registry_path):
 def read_registry(registry_path="data/registry"):
     import pandas as pd
 
+    parquet_error = None
     for path in registry_file_candidates(registry_path):
         if not path.exists():
             continue
         if path.suffix == ".parquet":
-            return pd.read_parquet(path)
+            try:
+                return pd.read_parquet(path)
+            except ImportError as exc:
+                parquet_error = exc
+                continue
         if path.suffix == ".csv":
             return pd.read_csv(path)
         raise ValueError(f"Unsupported registry format: {path}")
+    if parquet_error is not None:
+        raise parquet_error
     raise FileNotFoundError(f"No registry file found under {registry_path}")
 
 
