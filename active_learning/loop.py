@@ -24,7 +24,12 @@ from .registry import (
 
 # visualization + phase diagram
 from .visualization import visualize_reconstruction, visualize_reconstruction_components
-from .phase_diagram import predict_phase_mz, plot_phase_diagram, plot_dataset_phase_diagram
+from .phase_diagram import (
+    predict_phase_mz,
+    plot_phase_diagram,
+    plot_dataset_phase_comparison,
+    plot_dataset_phase_diagram,
+)
 
 # External modules
 from simulations.swapper import SimulationManager
@@ -453,11 +458,21 @@ class ActiveLearningLoop:
         out_dir = os.path.join(self.results_dir, "phase_diagrams")
         os.makedirs(out_dir, exist_ok=True)
 
+        tx_range_nm = (self.Tx_range[0] * 1e9, self.Tx_range[1] * 1e9)
+        tz_range_nm = (self.Tz_range[0] * 1e9, self.Tz_range[1] * 1e9)
         fig, _ = plot_dataset_phase_diagram(
             dataset.df,
-            tx_range_nm=(self.Tx_range[0] * 1e9, self.Tx_range[1] * 1e9),
-            tz_range_nm=(self.Tz_range[0] * 1e9, self.Tz_range[1] * 1e9),
+            tx_range_nm=tx_range_nm,
+            tz_range_nm=tz_range_nm,
             save_path=os.path.join(out_dir, f"phase_dataset_iter{iteration}.png"),
+        )
+        plt.close(fig)
+
+        fig, _ = plot_dataset_phase_comparison(
+            dataset.df,
+            tx_range_nm=tx_range_nm,
+            tz_range_nm=tz_range_nm,
+            save_path=os.path.join(out_dir, f"phase_dataset_comparison_iter{iteration}.png"),
         )
         plt.close(fig)
 
@@ -484,7 +499,7 @@ class ActiveLearningLoop:
 
         fig, _ = plot_phase_diagram(
             df,
-            title="Model-Predicted Phase Diagram",
+            title="CVAE Sample MeanMz Diagnostic",
             save_path=os.path.join(out_dir, f"phase_model_iter{iteration}.png"),
         )
         plt.close(fig)

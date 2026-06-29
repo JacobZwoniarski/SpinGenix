@@ -146,6 +146,8 @@ def _plot_landscape(
     levels=32,
     fill_nearest=False,
     smooth_sigma=0.0,
+    xlim_nm=None,
+    ylim_nm=None,
 ):
     if len(values) < 3:
         return None
@@ -180,8 +182,10 @@ def _plot_landscape(
             )
 
     if griddata is not None:
-        xi = np.linspace(float(np.min(x)), float(np.max(x)), grid_resolution)
-        yi = np.linspace(float(np.min(y)), float(np.max(y)), grid_resolution)
+        x_lower, x_upper = xlim_nm if xlim_nm is not None else (float(np.min(x)), float(np.max(x)))
+        y_lower, y_upper = ylim_nm if ylim_nm is not None else (float(np.min(y)), float(np.max(y)))
+        xi = np.linspace(float(x_lower), float(x_upper), grid_resolution)
+        yi = np.linspace(float(y_lower), float(y_upper), grid_resolution)
         grid_x, grid_y = np.meshgrid(xi, yi)
         method = interpolation
         if method not in {"nearest", "linear", "cubic"}:
@@ -204,7 +208,7 @@ def _plot_landscape(
                     grid_z = gaussian_filter(grid_z, sigma=float(smooth_sigma))
                 return ax.imshow(
                     np.ma.masked_invalid(grid_z),
-                    extent=(float(np.min(x)), float(np.max(x)), float(np.min(y)), float(np.max(y))),
+                    extent=(float(x_lower), float(x_upper), float(y_lower), float(y_upper)),
                     origin="lower",
                     cmap=cmap,
                     norm=norm,
@@ -289,6 +293,8 @@ def plot_phase_diagram(
             levels=levels,
             fill_nearest=fill_nearest,
             smooth_sigma=smooth_sigma,
+            xlim_nm=xlim_nm,
+            ylim_nm=ylim_nm,
         )
     elif style != "scatter":
         raise ValueError("style must be one of: 'landscape', 'surface', 'smooth', 'scatter'")
@@ -330,6 +336,14 @@ def plot_phase_diagram(
     return fig, ax
 
 
+def _padded_limits(limits, pad_fraction=0.02):
+    if limits is None:
+        return None
+    lower, upper = float(limits[0]), float(limits[1])
+    pad = max((upper - lower) * pad_fraction, 1e-9)
+    return lower - pad, upper + pad
+
+
 def plot_dataset_phase_diagram(
     df,
     save_path=None,
@@ -345,9 +359,92 @@ def plot_dataset_phase_diagram(
         cmap="turbo",
         style="scatter",
         overlay_points=False,
-        point_size=48,
-        xlim_nm=tx_range_nm,
-        ylim_nm=tz_range_nm,
+        point_size=42,
+        xlim_nm=_padded_limits(tx_range_nm),
+        ylim_nm=_padded_limits(tz_range_nm),
         save_path=save_path,
         show=show,
     )
+
+
+def plot_dataset_phase_comparison(
+    df,
+    save_path=None,
+    show=False,
+    tx_range_nm=None,
+    tz_range_nm=None,
+    value_col=None,
+):
+    value_col = value_col or ("MeanMz_abs" if "MeanMz_abs" in df.columns else None)
+    plot_df = _phase_axes_dataframe(df).dropna(subset=["Tx_nm", "Tz_nm", value_col or _default_value_column(df)])
+    value_col = value_col or _default_value_column(plot_df)
+    values = plot_df[value_col].astype(float).to_numpy(dtype=float)
+    norm = _value_norm(values, value_col)
+    cmap = _prepare_cmap(value_col, "turbo")
+    xlim = _padded_limits(tx_range_nm)
+    ylim = _padded_limits(tz_range_nm)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.6), sharex=True, sharey=True)
+
+    scatter = axes[0].scatter(
+        plot_df["Tx_nm"],
+        plot_df["Tz_nm"],
+        c=values,
+        cmap=cmap,
+        norm=norm,
+        s=44,
+        edgecolors="#1f2528",
+        linewidths=0.35,
+        alpha=0.94,
+    )
+    axes[0].set_title(f"Observed samples (n={len(plot_df)})")
+
+    mappable = _plot_landscape(
+        axes[1],
+        plot_df["Tx_nm"].to_numpy(dtype=float),
+        plot_df["Tz_nm"].to_numpy(dtype=float),
+        values,
+        cmap=cmap,
+        norm=norm,
+        grid_resolution=260,
+        interpolation="linear",
+        fill_nearest=True,
+        smooth_sigma=1.1,
+        xlim_nm=tx_range_nm,
+        ylim_nm=tz_range_nm,
+    )
+    if mappable is None:
+        mappable = scatter
+    axes[1].scatter(
+        plot_df["Tx_nm"],
+        plot_df["Tz_nm"],
+        facecolors="none",
+        edgecolors="#1f2528",
+        s=18,
+        linewidths=0.35,
+        alpha=0.45,
+    )
+    axes[1].set_title("Interpolated view")
+
+    for ax in axes:
+        ax.set_xlabel("Tx (nm)")
+        ax.set_ylabel("Tz (nm)")
+        if xlim is not None:
+            ax.set_xlim(*xlim)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        ax.set_facecolor("#f6f7f5")
+        ax.grid(color="#d7ddd8", linewidth=0.6, alpha=0.5)
+        ax.set_axisbelow(True)
+
+    fig.colorbar(mappable, ax=axes.ravel().tolist(), label="|Mean Mz|", fraction=0.046, pad=0.035)
+    fig.suptitle("Dataset Phase Diagram: Observed vs Interpolated", y=1.02)
+    fig.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    if show:
+        plt.show()
+
+    return fig, axes
