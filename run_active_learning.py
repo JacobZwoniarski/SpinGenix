@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+from datetime import datetime, timezone
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -79,6 +81,19 @@ def parse_args(argv=None):
     parser.add_argument("--dataset-dir", default="data/dataset")
     parser.add_argument("--normalizer-path", default="data/dataset/param_normalizer.json")
     parser.add_argument("--registry-dir", default="data/registry")
+    parser.add_argument(
+        "--dataset-work-dir",
+        default=None,
+        help=(
+            "Mutable per-run dataset/registry copy. Defaults to "
+            "<results-dir>/datasets/run_<UTC timestamp>. Ignored with --in-place-dataset."
+        ),
+    )
+    parser.add_argument(
+        "--in-place-dataset",
+        action="store_true",
+        help="Mutate --meta-path/--fields-path/--registry-dir directly. Use only for legacy runs.",
+    )
     parser.add_argument("--results-dir", default="results/active_learning")
     parser.add_argument(
         "--checkpoint-dir",
@@ -180,6 +195,91 @@ def build_submission_backend(args, *, transport=None):
     )
 
 
+def _utc_run_stamp():
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _unique_path(path):
+    path = Path(path)
+    if not path.exists():
+        return path
+    for idx in range(2, 1000):
+        candidate = path.with_name(f"{path.name}_{idx:02d}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not create a unique dataset work directory under {path.parent}")
+
+
+def _copy_if_exists(source, destination):
+    source = Path(source)
+    destination = Path(destination)
+    if not source.exists():
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return True
+
+
+def _copy_registry_if_exists(source, destination_dir):
+    source = Path(source)
+    destination_dir = Path(destination_dir)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    copied = []
+
+    if source.is_dir():
+        for filename in ("simulations.csv", "simulations.parquet"):
+            src = source / filename
+            if _copy_if_exists(src, destination_dir / filename):
+                copied.append(str(destination_dir / filename))
+    elif source.exists():
+        destination = destination_dir / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        copied.append(str(destination))
+
+    return copied
+
+
+def prepare_mutable_run_data(args):
+    """
+    Protect the seed dataset by copying mutable AL inputs into a per-run workdir.
+    The active-learning loop can append new samples without polluting the
+    bootstrap dataset used to start future experiments.
+    """
+    if args.in_place_dataset:
+        return None
+
+    work_dir = (
+        Path(args.dataset_work_dir)
+        if args.dataset_work_dir
+        else Path(args.results_dir) / "datasets" / f"run_{_utc_run_stamp()}"
+    )
+    work_dir = _unique_path(work_dir)
+    registry_dir = work_dir / "registry"
+
+    copied = {
+        "meta": _copy_if_exists(args.meta_path, work_dir / "meta.h5"),
+        "fields": _copy_if_exists(args.fields_path, work_dir / "fields.npz"),
+        "normalizer": _copy_if_exists(args.normalizer_path, work_dir / "param_normalizer.json"),
+        "registry": _copy_registry_if_exists(args.registry_dir, registry_dir),
+    }
+
+    args.dataset_dir = str(work_dir)
+    args.meta_path = str(work_dir / "meta.h5")
+    args.fields_path = str(work_dir / "fields.npz")
+    args.normalizer_path = str(work_dir / "param_normalizer.json")
+    args.registry_dir = str(registry_dir)
+
+    print(
+        "[run_active_learning] isolated mutable dataset: "
+        f"{work_dir} "
+        f"(meta={copied['meta']}, fields={copied['fields']}, "
+        f"normalizer={copied['normalizer']}, registry_files={len(copied['registry'])})",
+        flush=True,
+    )
+    return work_dir
+
+
 def main(argv=None, *, transport=None):
     args = parse_args(argv)
     submission_backend = build_submission_backend(args, transport=transport)
@@ -201,6 +301,8 @@ def main(argv=None, *, transport=None):
     acquisition_min_distance = None
     if args.acquisition_min_distance_nm is not None:
         acquisition_min_distance = float(args.acquisition_min_distance_nm) * 1e-9
+
+    prepare_mutable_run_data(args)
 
     print(
         "[run_active_learning] "

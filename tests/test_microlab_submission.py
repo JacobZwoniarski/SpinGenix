@@ -381,6 +381,7 @@ def test_run_active_learning_passes_max_submit_to_loop(monkeypatch, tmp_path):
 
     result = run_active_learning.main([
         "--dry-run",
+        "--in-place-dataset",
         "--max-submit",
         "2",
         "--results-dir",
@@ -392,6 +393,76 @@ def test_run_active_learning_passes_max_submit_to_loop(monkeypatch, tmp_path):
     assert result is None
     assert captured["max_submit"] == 2
     assert captured["iterations"] == 1
+
+
+def test_run_active_learning_copies_dataset_inputs_to_work_dir(monkeypatch, tmp_path):
+    import run_active_learning
+
+    source_dataset = tmp_path / "source_dataset"
+    source_registry = tmp_path / "source_registry"
+    source_dataset.mkdir()
+    source_registry.mkdir()
+    meta_path = source_dataset / "meta.h5"
+    fields_path = source_dataset / "fields.npz"
+    normalizer_path = source_dataset / "param_normalizer.json"
+    registry_csv = source_registry / "simulations.csv"
+    meta_path.write_text("meta")
+    fields_path.write_text("fields")
+    normalizer_path.write_text("{}")
+    registry_csv.write_text("simulation_id,Tx_val,Tz_val\nseed,1e-8,2e-8\n")
+
+    captured = {}
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+    class FakeLoop:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, iterations):
+            captured["iterations"] = iterations
+
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=FakeCuda()))
+    monkeypatch.setitem(
+        sys.modules,
+        "active_learning.loop",
+        types.SimpleNamespace(ActiveLearningLoop=FakeLoop),
+    )
+
+    work_dir = tmp_path / "results" / "datasets" / "run_test"
+    result = run_active_learning.main([
+        "--dry-run",
+        "--dataset-work-dir",
+        str(work_dir),
+        "--meta-path",
+        str(meta_path),
+        "--fields-path",
+        str(fields_path),
+        "--normalizer-path",
+        str(normalizer_path),
+        "--registry-dir",
+        str(source_registry),
+        "--results-dir",
+        str(tmp_path / "results"),
+        "--simulations-dir",
+        str(tmp_path / "SpinGenx_remote"),
+    ])
+
+    assert result is None
+    assert captured["meta_path"] == str(work_dir / "meta.h5")
+    assert captured["fields_path"] == str(work_dir / "fields.npz")
+    assert captured["dataset_dir"] == str(work_dir)
+    assert captured["normalizer_path"] == str(work_dir / "param_normalizer.json")
+    assert captured["registry_path"] == str(work_dir / "registry")
+    assert (work_dir / "meta.h5").read_text() == "meta"
+    assert (work_dir / "fields.npz").read_text() == "fields"
+    assert (work_dir / "param_normalizer.json").read_text() == "{}"
+    assert (work_dir / "registry" / "simulations.csv").read_text() == registry_csv.read_text()
+    assert meta_path.read_text() == "meta"
+    assert registry_csv.read_text().startswith("simulation_id")
 
 
 def test_microlab_backend_waits_for_task_completion(monkeypatch, tmp_path):
