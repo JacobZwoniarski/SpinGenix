@@ -130,6 +130,17 @@ def _to_hwc_array(field):
     return np.nan_to_num(field.astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=-1.0)
 
 
+def _valid_magnetization_mask(reference, eps=1e-6):
+    return np.linalg.norm(reference, axis=-1) > eps
+
+
+def _mask_prediction_to_reference(reference, prediction):
+    mask = _valid_magnetization_mask(reference)
+    masked = prediction.copy()
+    masked[~mask] = 0.0
+    return masked
+
+
 # =======================================================================
 # Reconstruction visualization
 # =======================================================================
@@ -155,7 +166,7 @@ def visualize_reconstruction(original, predicted, Tx, Tz, mode="hsl", save_path=
         )
 
     original = _to_hwc_array(original)
-    predicted = _to_hwc_array(predicted)
+    predicted = _mask_prediction_to_reference(original, _to_hwc_array(predicted))
 
     rgb_orig = convert_to_rgb(original, mode=mode)
     rgb_pred = convert_to_rgb(predicted, mode=mode)
@@ -163,11 +174,11 @@ def visualize_reconstruction(original, predicted, Tx, Tz, mode="hsl", save_path=
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     axes[0].set_title(f"Original\nTx={Tx*1e9:.1f} nm, Tz={Tz*1e9:.1f} nm")
-    axes[0].imshow(rgb_orig)
+    axes[0].imshow(rgb_orig, interpolation="bilinear")
     axes[0].axis("off")
 
     axes[1].set_title(f"Reconstruction ({mode})\nTx={Tx*1e9:.1f} nm, Tz={Tz*1e9:.1f} nm")
-    axes[1].imshow(rgb_pred)
+    axes[1].imshow(rgb_pred, interpolation="bilinear")
     axes[1].axis("off")
 
     fig.tight_layout()
@@ -196,7 +207,7 @@ def visualize_reconstruction_components(
     panels from different samples stay comparable.
     """
     original = np.clip(_to_hwc_array(original), -1.0, 1.0)
-    predicted = np.clip(_to_hwc_array(predicted), -1.0, 1.0)
+    predicted = np.clip(_mask_prediction_to_reference(original, _to_hwc_array(predicted)), -1.0, 1.0)
     diff = predicted - original
 
     finite_abs_diff = np.abs(diff[np.isfinite(diff)])
@@ -220,21 +231,21 @@ def visualize_reconstruction_components(
             cmap="RdBu_r",
             vmin=-1.0,
             vmax=1.0,
-            interpolation="nearest",
+            interpolation="bilinear",
         )
         axes[row, 1].imshow(
             predicted[:, :, row],
             cmap="RdBu_r",
             vmin=-1.0,
             vmax=1.0,
-            interpolation="nearest",
+            interpolation="bilinear",
         )
         diff_mappable = axes[row, 2].imshow(
             diff[:, :, row],
             cmap="RdBu_r",
             vmin=-diff_limit,
             vmax=diff_limit,
-            interpolation="nearest",
+            interpolation="bilinear",
         )
         for col in range(3):
             axes[row, col].set_xticks([])

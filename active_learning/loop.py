@@ -455,6 +455,8 @@ class ActiveLearningLoop:
 
         fig, _ = plot_dataset_phase_diagram(
             dataset.df,
+            tx_range_nm=(self.Tx_range[0] * 1e9, self.Tx_range[1] * 1e9),
+            tz_range_nm=(self.Tz_range[0] * 1e9, self.Tz_range[1] * 1e9),
             save_path=os.path.join(out_dir, f"phase_dataset_iter{iteration}.png"),
         )
         plt.close(fig)

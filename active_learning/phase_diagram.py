@@ -242,6 +242,8 @@ def plot_phase_diagram(
     levels=32,
     fill_nearest=False,
     smooth_sigma=0.0,
+    xlim_nm=None,
+    ylim_nm=None,
     ax=None,
     save_path=None,
     show=False,
@@ -311,8 +313,8 @@ def plot_phase_diagram(
     ax.set_xlabel("Tx (nm)")
     ax.set_ylabel("Tz (nm)")
     ax.set_title(title)
-    ax.set_xlim(*_axis_limits(x))
-    ax.set_ylim(*_axis_limits(y))
+    ax.set_xlim(*(xlim_nm if xlim_nm is not None else _axis_limits(x)))
+    ax.set_ylim(*(ylim_nm if ylim_nm is not None else _axis_limits(y)))
     ax.set_facecolor("#f6f7f5")
     ax.grid(color="#d7ddd8", linewidth=0.6, alpha=0.5)
     ax.set_axisbelow(True)
@@ -328,12 +330,24 @@ def plot_phase_diagram(
     return fig, ax
 
 
-def plot_dataset_phase_diagram(df, save_path=None, show=False):
+def plot_dataset_phase_diagram(
+    df,
+    save_path=None,
+    show=False,
+    tx_range_nm=None,
+    tz_range_nm=None,
+):
     return plot_phase_diagram(
         df,
         value_col="MeanMz_abs" if "MeanMz_abs" in df.columns else None,
-        title="Phase Diagram",
+        title="Dataset Phase Diagram",
         colorbar_label="|Mean Mz|",
+        cmap="turbo",
+        style="scatter",
+        overlay_points=False,
+        point_size=48,
+        xlim_nm=tx_range_nm,
+        ylim_nm=tz_range_nm,
         save_path=save_path,
         show=show,
     )
