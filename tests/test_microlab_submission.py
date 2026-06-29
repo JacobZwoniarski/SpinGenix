@@ -311,11 +311,7 @@ def test_run_active_learning_defaults_to_spingenx_project_24(monkeypatch):
         "/mnt/storage_6/project_data/pl0095-01/mateuszz/microlab/projects/"
         "24_spingenx/workspace/scratch/SpinGenx_remote"
     )
-    assert args.submission_manifest == os.path.join(
-        args.results_dir,
-        "submissions",
-        "submission_manifest.json",
-    )
+    assert args.submission_manifest is None
 
 
 def test_run_active_learning_preflight_only_queries_microlab_project_24(monkeypatch):
@@ -382,6 +378,7 @@ def test_run_active_learning_passes_max_submit_to_loop(monkeypatch, tmp_path):
     result = run_active_learning.main([
         "--dry-run",
         "--in-place-dataset",
+        "--in-place-results",
         "--max-submit",
         "2",
         "--results-dir",
@@ -432,11 +429,12 @@ def test_run_active_learning_copies_dataset_inputs_to_work_dir(monkeypatch, tmp_
         types.SimpleNamespace(ActiveLearningLoop=FakeLoop),
     )
 
-    work_dir = tmp_path / "results" / "datasets" / "run_test"
+    run_dir = tmp_path / "results" / "run_test"
+    work_dir = run_dir / "dataset"
     result = run_active_learning.main([
         "--dry-run",
-        "--dataset-work-dir",
-        str(work_dir),
+        "--run-name",
+        "run_test",
         "--meta-path",
         str(meta_path),
         "--fields-path",
@@ -452,6 +450,7 @@ def test_run_active_learning_copies_dataset_inputs_to_work_dir(monkeypatch, tmp_
     ])
 
     assert result is None
+    assert captured["results_dir"] == str(run_dir)
     assert captured["meta_path"] == str(work_dir / "meta.h5")
     assert captured["fields_path"] == str(work_dir / "fields.npz")
     assert captured["dataset_dir"] == str(work_dir)

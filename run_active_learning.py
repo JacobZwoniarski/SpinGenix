@@ -86,7 +86,7 @@ def parse_args(argv=None):
         default=None,
         help=(
             "Mutable per-run dataset/registry copy. Defaults to "
-            "<results-dir>/datasets/run_<UTC timestamp>. Ignored with --in-place-dataset."
+            "<run-dir>/dataset. Ignored with --in-place-dataset."
         ),
     )
     parser.add_argument(
@@ -95,6 +95,24 @@ def parse_args(argv=None):
         help="Mutate --meta-path/--fields-path/--registry-dir directly. Use only for legacy runs.",
     )
     parser.add_argument("--results-dir", default="results/active_learning")
+    parser.add_argument(
+        "--run-dir",
+        default=None,
+        help=(
+            "Directory for this run's outputs. Defaults to "
+            "<results-dir>/run_<UTC timestamp>. Ignored with --in-place-results."
+        ),
+    )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Stable run directory name under --results-dir, for example al_2nm_v2.",
+    )
+    parser.add_argument(
+        "--in-place-results",
+        action="store_true",
+        help="Write outputs directly into --results-dir. Use only for legacy layout/debugging.",
+    )
     parser.add_argument(
         "--checkpoint-dir",
         default=None,
@@ -164,13 +182,6 @@ def parse_args(argv=None):
     )
 
     args = parser.parse_args(argv)
-    if args.submission_manifest is None:
-        args.submission_manifest = os.path.join(
-            args.results_dir,
-            "submissions",
-            "submission_manifest.json",
-        )
-
     return args
 
 
@@ -240,6 +251,31 @@ def _copy_registry_if_exists(source, destination_dir):
     return copied
 
 
+def prepare_run_paths(args):
+    if args.in_place_results:
+        run_dir = Path(args.results_dir)
+    else:
+        if args.run_dir:
+            run_dir = Path(args.run_dir)
+        elif args.run_name:
+            run_dir = Path(args.results_dir) / args.run_name
+        else:
+            run_dir = Path(args.results_dir) / f"run_{_utc_run_stamp()}"
+        run_dir = _unique_path(run_dir)
+        args.results_dir = str(run_dir)
+
+    Path(args.results_dir).mkdir(parents=True, exist_ok=True)
+    if args.submission_manifest is None:
+        args.submission_manifest = os.path.join(
+            args.results_dir,
+            "submissions",
+            "submission_manifest.json",
+        )
+
+    print(f"[run_active_learning] run outputs: {args.results_dir}", flush=True)
+    return Path(args.results_dir)
+
+
 def prepare_mutable_run_data(args):
     """
     Protect the seed dataset by copying mutable AL inputs into a per-run workdir.
@@ -249,11 +285,7 @@ def prepare_mutable_run_data(args):
     if args.in_place_dataset:
         return None
 
-    work_dir = (
-        Path(args.dataset_work_dir)
-        if args.dataset_work_dir
-        else Path(args.results_dir) / "datasets" / f"run_{_utc_run_stamp()}"
-    )
+    work_dir = Path(args.dataset_work_dir) if args.dataset_work_dir else Path(args.results_dir) / "dataset"
     work_dir = _unique_path(work_dir)
     registry_dir = work_dir / "registry"
 
@@ -282,14 +314,17 @@ def prepare_mutable_run_data(args):
 
 def main(argv=None, *, transport=None):
     args = parse_args(argv)
-    submission_backend = build_submission_backend(args, transport=transport)
 
     if args.preflight_only:
+        submission_backend = build_submission_backend(args, transport=transport)
         if submission_backend is None or not hasattr(submission_backend, "preflight"):
             raise ValueError("--preflight-only requires --submission-backend amucontainers")
         result = submission_backend.preflight()
         print(json.dumps(result, indent=2, sort_keys=True), flush=True)
         return result
+
+    prepare_run_paths(args)
+    submission_backend = build_submission_backend(args, transport=transport)
 
     import torch  # noqa: WPS433
     from active_learning.loop import ActiveLearningLoop  # noqa: WPS433
