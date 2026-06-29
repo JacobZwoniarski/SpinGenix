@@ -32,9 +32,12 @@ except Exception:  # pragma: no cover - scipy is part of the project env
 @torch.no_grad()
 def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda", param_normalizer=None):
     """
-    Generate MeanMz for all grid points using the CVAE decoder.
-    Returns:
-        DataFrame with Tx_val, Tz_val, MeanMz_signed, MeanMz_abs, MeanMz
+    Generate scalar phase metrics for all grid points using a params -> field model.
+
+    For multi-parameter normalizers, Tx/Tz are swept when present and all
+    remaining parameters are frozen at the midpoint of their training range.
+    Older reconstruction CVAE models are still supported only as a debug
+    fallback by feeding a zero field.
     """
     records = []
     H = getattr(model, "spatial_size", 200)
@@ -43,9 +46,23 @@ def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda", param_normalizer=No
     model.to(device)
     model.eval()
 
+    if param_normalizer is not None:
+        columns = tuple(param_normalizer.param_columns)
+        column_to_idx = {column: idx for idx, column in enumerate(columns)}
+        tx_idx = column_to_idx.get("Tx_val", 0)
+        tz_idx = column_to_idx.get("Tz_val", 1 if len(columns) > 1 else 0)
+        base = 0.5 * (np.asarray(param_normalizer.mins) + np.asarray(param_normalizer.maxs))
+    else:
+        columns = ("Tx_val", "Tz_val")
+        tx_idx = 0
+        tz_idx = 1
+        base = np.zeros(2, dtype=np.float64)
+
     for tx in Tx_grid:
         for tz in Tz_grid:
-            cond_values = np.array([tx, tz], dtype=np.float64)
+            cond_values = base.copy()
+            cond_values[tx_idx] = tx
+            cond_values[tz_idx] = tz
             if param_normalizer is not None:
                 cond_values = param_normalizer.transform(cond_values)
             cond_values = np.asarray(cond_values, dtype=np.float32)[None, :]
@@ -60,8 +77,8 @@ def predict_phase_mz(model, Tx_grid, Tz_grid, device="cuda", param_normalizer=No
             mean_mz_abs = float(np.mean(np.abs(mz)))
 
             records.append({
-                "Tx_val": tx,
-                "Tz_val": tz,
+                "Tx_val": float(tx),
+                "Tz_val": float(tz),
                 "MeanMz_signed": float(np.mean(mz)),
                 "MeanMz_abs": mean_mz_abs,
                 "MeanMz": mean_mz_abs,

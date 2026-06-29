@@ -39,7 +39,12 @@ from active_learning.evaluation import (  # noqa: E402
 )
 from active_learning.phase_diagram import plot_phase_diagram  # noqa: E402
 from active_learning.param_surrogate import ConditionalResNetDecoder  # noqa: E402
-from active_learning.trainer import WeightedMSELoss  # noqa: E402
+from active_learning.surrogate_schema import (  # noqa: E402
+    DEFAULT_FIELD_REPRESENTATION,
+    build_param_surrogate_schema,
+    field_metrics,
+)
+from active_learning.trainer import MaskedWeightedMSELoss  # noqa: E402
 from active_learning.visualization import (  # noqa: E402
     visualize_reconstruction,
     visualize_reconstruction_components,
@@ -347,32 +352,48 @@ def sample_model_phase_dataframe(model, normalizer, device, grid_points, batch_s
     if normalizer is None:
         raise RuntimeError("Cannot sample model phase grid without a parameter normalizer.")
 
-    column_to_idx = {column: idx for idx, column in enumerate(normalizer.param_columns)}
-    tx_idx = column_to_idx.get("Tx_val", 0)
-    tz_idx = column_to_idx.get("Tz_val", 1)
+    columns = tuple(normalizer.param_columns)
+    column_to_idx = {column: idx for idx, column in enumerate(columns)}
+    tx_col = "Tx_val" if "Tx_val" in column_to_idx else columns[0]
+    tz_col = "Tz_val" if "Tz_val" in column_to_idx else columns[1]
+    tx_idx = column_to_idx[tx_col]
+    tz_idx = column_to_idx[tz_col]
+
+    base = 0.5 * (np.asarray(normalizer.mins, dtype=np.float64) + np.asarray(normalizer.maxs, dtype=np.float64))
     tx_values = np.linspace(normalizer.mins[tx_idx], normalizer.maxs[tx_idx], grid_points)
     tz_values = np.linspace(normalizer.mins[tz_idx], normalizer.maxs[tz_idx], grid_points)
-    points = [(tx, tz) for tx in tx_values for tz in tz_values]
+
+    physical_rows = []
+    for tz in tz_values:
+        for tx in tx_values:
+            row = base.copy()
+            row[tx_idx] = tx
+            row[tz_idx] = tz
+            physical_rows.append(row)
 
     rows = []
     model.eval()
-    for start in range(0, len(points), batch_size):
-        physical = np.asarray(points[start:start + batch_size], dtype=np.float64)
+    for start in range(0, len(physical_rows), batch_size):
+        physical = np.asarray(physical_rows[start:start + batch_size], dtype=np.float64)
         normalized = normalizer.transform(physical)
         params = torch.tensor(normalized, dtype=torch.float32, device=device)
         pred = model.sample(params).detach().cpu().numpy()
-        for local_idx, (tx, tz) in enumerate(physical):
-            field = pred[local_idx]
-            mz = field[2]
-            rows.append({
-                "Tx_val": float(tx),
-                "Tz_val": float(tz),
-                "Tx_nm": float(tx * 1e9),
-                "Tz_nm": float(tz * 1e9),
-                "MeanMz_signed": float(np.mean(mz)),
-                "MeanMz_abs": float(np.mean(np.abs(mz))),
-                "MeanMz": float(np.mean(np.abs(mz))),
+        for local_idx, physical_row in enumerate(physical):
+            metrics = field_metrics(pred[local_idx])
+            row = {column: float(value) for column, value in zip(columns, physical_row)}
+            row.update({
+                "Tx_val": float(physical_row[tx_idx]),
+                "Tz_val": float(physical_row[tz_idx]),
+                "Tx_nm": float(physical_row[tx_idx] * 1e9),
+                "Tz_nm": float(physical_row[tz_idx] * 1e9),
+                "MeanMx": metrics["mean_mx"],
+                "MeanMy": metrics["mean_my"],
+                "MeanMz_signed": metrics["mean_mz"],
+                "MeanMz_abs": metrics["mean_abs_mz"],
+                "MeanMz": metrics["mean_abs_mz"],
+                "MeanNorm": metrics["mean_norm"],
             })
+            rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -471,7 +492,7 @@ def main():
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    rec_loss_fn = WeightedMSELoss()
+    rec_loss_fn = MaskedWeightedMSELoss(mask_threshold=args.mask_threshold)
 
     train_loader = DataLoader(
         train_dataset,
@@ -535,18 +556,53 @@ def main():
     pd.DataFrame(history).to_csv(out_dir / "training_history.csv", index=False)
 
     checkpoint_path = out_dir / "param_surrogate.pt"
+    normalizer_payload = (
+        base_dataset.param_normalizer.to_dict()
+        if base_dataset.param_normalizer is not None
+        else None
+    )
+    schema = build_param_surrogate_schema(
+        base_dataset.param_columns,
+        target_shape=(200, 200, 3),
+        field_representation=DEFAULT_FIELD_REPRESENTATION,
+    )
+    param_ranges = {}
+    if base_dataset.param_normalizer is not None:
+        for column, lower, upper in zip(
+            base_dataset.param_normalizer.param_columns,
+            base_dataset.param_normalizer.mins,
+            base_dataset.param_normalizer.maxs,
+        ):
+            param_ranges[str(column)] = {"min": float(lower), "max": float(upper)}
+
     torch.save(
         {
+            "schema_version": 2,
+            **schema.to_checkpoint_dict(),
             "model_class": "ConditionalResNetDecoder",
             "model_config": model.config(),
             "model_state_dict": model.state_dict(),
-            "param_normalizer": (
-                base_dataset.param_normalizer.to_dict()
-                if base_dataset.param_normalizer is not None
-                else None
-            ),
+            "param_normalizer": normalizer_payload,
             "param_columns": list(base_dataset.param_columns),
-            "note": "V2 deterministic surrogate baseline: normalized params -> canonical 200x200x3 field.",
+            "param_ranges": param_ranges,
+            "training": {
+                "epochs": int(args.epochs),
+                "batch_size": int(args.batch_size),
+                "lr": float(args.lr),
+                "weight_decay": float(args.weight_decay),
+                "norm_weight": float(args.norm_weight),
+                "mask_threshold": float(args.mask_threshold),
+                "device": str(args.device),
+                "seed": int(args.seed),
+            },
+            "dataset": {
+                "meta_path": str(args.meta_path),
+                "fields_path": str(args.fields_path),
+                "normalizer_path": str(args.normalizer_path),
+                "samples": int(len(base_dataset)),
+                "audit": audit,
+            },
+            "note": "Production v1 surrogate: physical parameters -> canonical 200x200x3 field.",
         },
         checkpoint_path,
     )

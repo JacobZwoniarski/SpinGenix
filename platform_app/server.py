@@ -31,6 +31,7 @@ import torch  # noqa: E402
 
 from active_learning.normalization import ParamNormalizer  # noqa: E402
 from active_learning.param_surrogate import ConditionalResNetDecoder  # noqa: E402
+from active_learning.surrogate_schema import checkpoint_schema, field_metrics  # noqa: E402
 from postprocess.preprocess import classify_state, compute_topological_charge  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -136,21 +137,52 @@ def read_json_file(path):
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def normalizer_range_nm(normalizer_payload):
+LENGTH_PARAM_NAMES = {"Tx", "Ty", "Tz"}
+
+
+def param_display_name(column):
+    value = str(column)
+    return value[:-4] if value.endswith("_val") else value
+
+
+def param_display_unit(column):
+    return "nm" if param_display_name(column) in LENGTH_PARAM_NAMES else "SI"
+
+
+def param_display_scale(column):
+    return 1e9 if param_display_unit(column) == "nm" else 1.0
+
+
+def normalizer_parameter_ranges(normalizer_payload):
     if not normalizer_payload:
-        return None
+        return {}
 
     columns = normalizer_payload.get("param_columns") or []
     mins = normalizer_payload.get("mins") or []
     maxs = normalizer_payload.get("maxs") or []
     ranges = {}
     for name, lower, upper in zip(columns, mins, maxs):
-        short = name.replace("_val", "")
-        ranges[short] = {
-            "min": float(lower) * 1e9,
-            "max": float(upper) * 1e9,
+        display = param_display_name(name)
+        scale = param_display_scale(name)
+        ranges[display] = {
+            "column": name,
+            "label": display,
+            "unit": param_display_unit(name),
+            "min": float(lower) * scale,
+            "max": float(upper) * scale,
+            "raw_min": float(lower),
+            "raw_max": float(upper),
         }
     return ranges
+
+
+def normalizer_range_nm(normalizer_payload):
+    ranges = normalizer_parameter_ranges(normalizer_payload)
+    return {
+        label: {"min": row["min"], "max": row["max"]}
+        for label, row in ranges.items()
+        if row.get("unit") == "nm"
+    }
 
 
 def checkpoint_info(checkpoint_path):
@@ -169,11 +201,18 @@ def checkpoint_info(checkpoint_path):
     try:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         normalizer_payload = checkpoint.get("param_normalizer")
+        schema = checkpoint_schema(checkpoint)
         info.update({
+            "schema_version": checkpoint.get("schema_version"),
+            "model_kind": schema.model_kind,
             "model_class": checkpoint.get("model_class"),
             "model_config": checkpoint.get("model_config"),
+            "field_representation": schema.field_representation,
+            "target_shape": list(schema.target_shape),
+            "metric_columns": list(schema.metric_columns),
             "note": checkpoint.get("note"),
-            "param_columns": checkpoint.get("param_columns"),
+            "param_columns": list(schema.param_columns),
+            "parameter_ranges": normalizer_parameter_ranges(normalizer_payload),
             "normalizer_range_nm": normalizer_range_nm(normalizer_payload),
         })
     except Exception as exc:
@@ -265,29 +304,89 @@ def render_field_components_png_base64(field_hwc):
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def checkpoint_param_columns(checkpoint_payload, normalizer):
+    if normalizer is not None:
+        return tuple(normalizer.param_columns)
+    return tuple(checkpoint_schema(checkpoint_payload).param_columns)
+
+
+def midpoint_for_column(column, normalizer):
+    if normalizer is None:
+        return 0.0
+    columns = list(normalizer.param_columns)
+    if column not in columns:
+        return 0.0
+    idx = columns.index(column)
+    return float(0.5 * (normalizer.mins[idx] + normalizer.maxs[idx]))
+
+
+def parse_prediction_params(query, columns, normalizer):
+    physical = []
+    display_rows = []
+    warnings = []
+
+    for column in columns:
+        label = param_display_name(column)
+        unit = param_display_unit(column)
+        scale = param_display_scale(column)
+        aliases = [
+            column,
+            column.lower(),
+            label,
+            label.lower(),
+        ]
+        if unit == "nm":
+            aliases.extend([f"{label}_nm", f"{label.lower()}_nm"])
+
+        raw_value = None
+        raw_alias = None
+        for alias in aliases:
+            if alias in query and query[alias]:
+                raw_value = query[alias][0]
+                raw_alias = alias
+                break
+
+        if raw_value is None:
+            value_si = midpoint_for_column(column, normalizer)
+            display_value = value_si * scale
+        else:
+            display_value = float(raw_value)
+            value_si = display_value / scale if unit == "nm" and raw_alias not in {column, column.lower()} else float(raw_value)
+
+        physical.append(value_si)
+        display_rows.append({
+            "column": column,
+            "label": label,
+            "unit": unit,
+            "value": display_value if unit == "nm" else value_si,
+            "raw_value": value_si,
+        })
+
+        if normalizer is not None and column in normalizer.param_columns:
+            idx = list(normalizer.param_columns).index(column)
+            low = float(normalizer.mins[idx])
+            high = float(normalizer.maxs[idx])
+            if value_si < low or value_si > high:
+                warnings.append(
+                    f"{label}={display_value:.5g} {unit} is outside the checkpoint range "
+                    f"{low * scale:.5g}-{high * scale:.5g} {unit}."
+                )
+
+    return np.asarray(physical, dtype=np.float64), display_rows, warnings
+
+
 def predict_param_surrogate(query):
     checkpoint = query.get("checkpoint", [None])[0]
     if not checkpoint:
         raise ValueError("Missing checkpoint path.")
-    tx_nm = float(query.get("tx_nm", [50.0])[0])
-    tz_nm = float(query.get("tz_nm", [50.0])[0])
     device = query.get("device", ["cpu"])[0]
     if device == "cuda" and not torch.cuda.is_available():
         device = "cpu"
 
     model, normalizer, checkpoint_payload = load_checkpoint(checkpoint, device=device)
-    physical = np.array([tx_nm * 1e-9, tz_nm * 1e-9], dtype=np.float64)
-    warnings = []
-    normalizer_payload = checkpoint_payload.get("param_normalizer")
-    ranges = normalizer_range_nm(normalizer_payload)
-    if ranges:
-        for label, value in [("Tx", tx_nm), ("Tz", tz_nm)]:
-            bounds = ranges.get(label)
-            if bounds and not (bounds["min"] <= value <= bounds["max"]):
-                warnings.append(
-                    f"{label}={value:.3f} nm is outside the checkpoint range "
-                    f"{bounds['min']:.3f}-{bounds['max']:.3f} nm."
-                )
+    schema = checkpoint_schema(checkpoint_payload)
+    columns = checkpoint_param_columns(checkpoint_payload, normalizer)
+    physical, param_rows, warnings = parse_prediction_params(query, columns, normalizer)
 
     normalized = normalizer.transform(physical) if normalizer else physical.astype(np.float32)
     normalized = np.asarray(normalized, dtype=np.float32)[None, :]
@@ -295,30 +394,42 @@ def predict_param_surrogate(query):
     with torch.no_grad():
         field_chw = model.sample(params)[0].detach().cpu().numpy()
     field_hwc = np.transpose(field_chw, (1, 2, 0)).astype(np.float32)
+
     mx = field_hwc[:, :, 0]
     my = field_hwc[:, :, 1]
     mz = field_hwc[:, :, 2]
-    mean_mx = float(np.mean(mx))
-    mean_my = float(np.mean(my))
-    mean_mz_signed = float(np.mean(mz))
-    mean_mz_abs = float(np.mean(np.abs(mz)))
-    in_plane_order = float(np.sqrt(mean_mx**2 + mean_my**2))
+    metric_values = field_metrics(field_hwc)
+    in_plane_order = float(np.sqrt(metric_values["mean_mx"]**2 + metric_values["mean_my"]**2))
     topological_charge = float(compute_topological_charge(mx, my, mz))
     state_guess = classify_state(mx, my, mz, in_plane_order, topological_charge)
+
+    by_label = {row["label"]: row for row in param_rows}
+    tx_nm = by_label.get("Tx", {}).get("value")
+    tz_nm = by_label.get("Tz", {}).get("value")
+
     return {
         "checkpoint": checkpoint,
         "device": device,
+        "field_shape": list(field_hwc.shape),
+        "field_representation": schema.field_representation,
+        "target_shape": list(schema.target_shape),
+        "param_columns": list(columns),
+        "params": param_rows,
         "tx_nm": tx_nm,
         "tz_nm": tz_nm,
         "warnings": warnings,
-        "normalizer_range_nm": ranges,
+        "parameter_ranges": normalizer_parameter_ranges(checkpoint_payload.get("param_normalizer")),
+        "normalizer_range_nm": normalizer_range_nm(checkpoint_payload.get("param_normalizer")),
         "normalized_params": normalized[0].tolist(),
         "state_guess": state_guess,
         "metrics": {
-            "MeanMx": mean_mx,
-            "MeanMy": mean_my,
-            "MeanMz_signed": mean_mz_signed,
-            "MeanMz_abs": mean_mz_abs,
+            "MeanMx": metric_values["mean_mx"],
+            "MeanMy": metric_values["mean_my"],
+            "MeanMz_signed": metric_values["mean_mz"],
+            "MeanMz_abs": metric_values["mean_abs_mz"],
+            "MeanAbsMx": metric_values["mean_abs_mx"],
+            "MeanAbsMy": metric_values["mean_abs_my"],
+            "MeanNorm": metric_values["mean_norm"],
             "InPlaneOrder": in_plane_order,
             "Q": topological_charge,
         },

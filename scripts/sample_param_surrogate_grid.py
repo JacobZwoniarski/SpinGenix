@@ -31,6 +31,7 @@ os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 from active_learning.normalization import ParamNormalizer  # noqa: E402
 from active_learning.param_surrogate import ConditionalResNetDecoder  # noqa: E402
 from active_learning.phase_diagram import plot_phase_diagram  # noqa: E402
+from active_learning.surrogate_schema import DEFAULT_FIELD_REPRESENTATION  # noqa: E402
 from postprocess.preprocess import compute_topological_charge  # noqa: E402
 
 
@@ -114,28 +115,38 @@ def main():
 
     tx_values = np.linspace(nm_to_si(tx_min_nm), nm_to_si(tx_max_nm), args.grid_points)
     tz_values = np.linspace(nm_to_si(tz_min_nm), nm_to_si(tz_max_nm), args.grid_points)
-    points = [(tx, tz) for tx in tx_values for tz in tz_values]
+
+    base = 0.5 * (np.asarray(normalizer.mins, dtype=np.float64) + np.asarray(normalizer.maxs, dtype=np.float64))
+    physical_rows = []
+    for tx in tx_values:
+        for tz in tz_values:
+            row = base.copy()
+            row[tx_idx] = tx
+            row[tz_idx] = tz
+            physical_rows.append(row)
 
     rows = []
     fields = {}
     field_index = 0
 
-    for start in range(0, len(points), args.batch_size):
-        batch_points = points[start:start + args.batch_size]
-        physical = np.asarray(batch_points, dtype=np.float64)
+    for start in range(0, len(physical_rows), args.batch_size):
+        physical = np.asarray(physical_rows[start:start + args.batch_size], dtype=np.float64)
         normalized = normalizer.transform(physical)
         params = torch.tensor(normalized, dtype=torch.float32, device=args.device)
         with torch.no_grad():
             pred = model.sample(params).cpu().numpy()
 
-        for local_idx, (tx, tz) in enumerate(batch_points):
+        for local_idx, physical_row in enumerate(physical):
+            tx = float(physical_row[tx_idx])
+            tz = float(physical_row[tz_idx])
             field_chw = pred[local_idx]
             field_hwc = np.transpose(field_chw, (1, 2, 0)).astype(np.float32)
             field_key = str(field_index)
             if not args.no_fields:
                 fields[field_key] = field_hwc
 
-            rows.append({
+            row = {column: float(value) for column, value in zip(normalizer.param_columns, physical_row)}
+            row.update({
                 "field_key": field_key,
                 "Tx_val": tx,
                 "Ty_val": tx,
@@ -146,9 +157,10 @@ def main():
                 "target_Nx": model.spatial_size,
                 "target_Ny": model.spatial_size,
                 "target_Nz": 1,
-                "field_representation": "canonical_200x200x3",
+                "field_representation": DEFAULT_FIELD_REPRESENTATION,
                 **field_metrics(field_hwc),
             })
+            rows.append(row)
             field_index += 1
 
     meta_df = pd.DataFrame(rows)

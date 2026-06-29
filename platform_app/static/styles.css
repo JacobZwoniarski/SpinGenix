@@ -209,6 +209,11 @@ input[type="range"] {
   background: transparent;
 }
 
+.param-control-stack {
+  display: grid;
+  gap: 12px;
+}
+
 .slider-row {
   gap: 8px;
 }

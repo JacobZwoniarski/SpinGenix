@@ -10,9 +10,9 @@ from pathlib import Path
 from torch.utils.data import Subset
 
 from .dataset import MagnetizationDataset
-from .trainer import train_cvae
-from .model import UNetCVAE
-from .uncertainty import compute_uncertainty_map
+from .trainer import train_param_surrogate
+from .param_surrogate import ConditionalResNetDecoder
+from .surrogate_schema import DEFAULT_FIELD_REPRESENTATION, build_param_surrogate_schema
 from .acquisition import select_top_k
 from .registry import (
     HOLDOUT_SPLITS,
@@ -294,15 +294,40 @@ class ActiveLearningLoop:
             loss=loss,
             stage=stage,
         )
+        normalizer_payload = metadata.get("dataset", {}).get("param_normalizer")
+        schema = build_param_surrogate_schema(
+            self.param_columns,
+            target_shape=(200, 200, 3),
+            field_representation=DEFAULT_FIELD_REPRESENTATION,
+        )
+        param_ranges = {}
+        if normalizer_payload:
+            for column, lower, upper in zip(
+                normalizer_payload.get("param_columns", []),
+                normalizer_payload.get("mins", []),
+                normalizer_payload.get("maxs", []),
+            ):
+                param_ranges[str(column)] = {"min": float(lower), "max": float(upper)}
+
         payload = {
-            "metadata": metadata,
+            "schema_version": 2,
+            **schema.to_checkpoint_dict(),
+            "model_class": model.__class__.__name__,
+            "model_config": model.config() if hasattr(model, "config") else {},
             "model_state_dict": model.state_dict(),
+            "param_normalizer": normalizer_payload,
+            "param_columns": list(self.param_columns),
+            "param_ranges": param_ranges,
+            "metadata": metadata,
+            "training": metadata.get("training", {}),
+            "active_learning": metadata.get("active_learning", {}),
             "optimizer_state_dict": (
                 optimizer.state_dict()
                 if hasattr(optimizer, "state_dict")
                 else optimizer
             ),
             "rng_state": self.checkpoint_rng_state(),
+            "note": "Active-learning params -> canonical 200x200x3 field surrogate checkpoint.",
         }
 
         tmp_checkpoint = checkpoint_path.with_suffix(".pt.tmp")
@@ -314,6 +339,11 @@ class ActiveLearningLoop:
         os.replace(tmp_metadata, metadata_path)
         shutil.copy2(checkpoint_path, latest_path)
         shutil.copy2(metadata_path, latest_metadata_path)
+        if stage == "final":
+            run_dir = Path(self.results_dir)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(checkpoint_path, run_dir / "param_surrogate.pt")
+            shutil.copy2(metadata_path, run_dir / "param_surrogate.json")
         self.log(f"[AL] Checkpoint saved: {checkpoint_path}")
         return str(checkpoint_path)
 
@@ -427,13 +457,10 @@ class ActiveLearningLoop:
         for idx in indices:
             field, params = dataset[idx]
             with torch.no_grad():
-                recon, mu, logvar = model(
-                    field.unsqueeze(0).to(self.device),
-                    params.unsqueeze(0).to(self.device)
-                )
+                pred_tensor = model.sample(params.unsqueeze(0).to(self.device))
 
             orig = field.cpu().numpy()
-            pred = recon[0].cpu().numpy()
+            pred = pred_tensor[0].cpu().numpy()
             Tx, Tz = dataset.physical_params(int(idx))
 
             # HSL mode
@@ -499,10 +526,34 @@ class ActiveLearningLoop:
 
         fig, _ = plot_phase_diagram(
             df,
-            title="CVAE Sample MeanMz Diagnostic",
+            title="Param-Surrogate Phase Diagram",
             save_path=os.path.join(out_dir, f"phase_model_iter{iteration}.png"),
         )
         plt.close(fig)
+
+    def compute_coverage_acquisition(self, dataset, Tx_grid, Tz_grid):
+        """Score candidate points by distance from existing simulated points."""
+
+        existing_points = dataset.df[["Tx_val", "Tz_val"]].to_numpy(dtype=float)
+        registry_points, _ = self.load_registry_exclusions()
+        if registry_points is not None and len(registry_points):
+            existing_points = np.vstack([existing_points, registry_points])
+
+        U = np.zeros((len(Tx_grid), len(Tz_grid)), dtype=np.float32)
+        if existing_points.size == 0:
+            U.fill(1.0)
+            return U
+
+        for i, Tx in enumerate(Tx_grid):
+            for j, Tz in enumerate(Tz_grid):
+                diff = existing_points[:, :2] - np.asarray([Tx, Tz], dtype=float)
+                distances = np.linalg.norm(diff, axis=1)
+                U[i, j] = float(np.min(distances))
+
+        max_value = float(np.max(U))
+        if max_value > 0:
+            U /= max_value
+        return U
 
     # ---------------------------------------------------------------
     # Main AL loop
@@ -527,9 +578,11 @@ class ActiveLearningLoop:
             self.log(f"[AL] Loaded dataset: {len(dataset)} samples.")
             self.save_dataset_phase_diagram(dataset, iteration=it+1)
 
-            # 2. Train model
-            model = UNetCVAE(spatial_size=200)
+            # 2. Train production params -> field surrogate
+            cond_dim = dataset.param_normalizer.dim if dataset.param_normalizer is not None else len(self.param_columns)
+            model = ConditionalResNetDecoder(spatial_size=200, cond_dim=cond_dim)
             train_dataset = self.training_subset(dataset)
+
             def checkpoint_callback(model, optimizer, epoch, loss):
                 if self.checkpoint_every_epoch:
                     self.save_model_checkpoint(
@@ -542,7 +595,7 @@ class ActiveLearningLoop:
                         stage="epoch",
                     )
 
-            model = train_cvae(
+            model = train_param_surrogate(
                 model,
                 train_dataset,
                 epochs=self.epochs,
@@ -571,18 +624,11 @@ class ActiveLearningLoop:
             self.save_phase_diagram(model, iteration=it+1)
 
             # ------------------------------------------------------
-            # 3. Compute uncertainty map
+            # 3. Compute acquisition score map
             # ------------------------------------------------------
             Tx_grid, Tz_grid = self.generate_grid()
-            self.log(f"[AL] Computing uncertainty on {self.grid_points}×{self.grid_points} grid...")
-            U = compute_uncertainty_map(
-                model,
-                Tx_grid,
-                Tz_grid,
-                mc_samples=self.mc_samples,
-                device=self.device,
-                param_normalizer=dataset.param_normalizer,
-            )
+            self.log(f"[AL] Computing coverage acquisition on {self.grid_points}x{self.grid_points} grid...")
+            U = self.compute_coverage_acquisition(dataset, Tx_grid, Tz_grid)
 
             # 4. Select K new points
             if self.acquisition_min_distance is None:

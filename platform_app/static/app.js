@@ -4,6 +4,7 @@ const state = {
   selectedAcquisition: "",
   lastPrediction: null,
   checkpointInfoRequest: 0,
+  paramValues: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -191,24 +192,70 @@ function activeCheckpointRun() {
   return checkpointRuns().find((run) => run.checkpoint === checkpoint) || null;
 }
 
-function checkpointRange(run = activeCheckpointRun()) {
-  const ranges = run?.checkpoint_info?.normalizer_range_nm;
-  if (ranges?.Tx && ranges?.Tz) {
-    return ranges;
+function parameterRanges(run = activeCheckpointRun()) {
+  const infoRanges = run?.checkpoint_info?.parameter_ranges;
+  if (infoRanges && Object.keys(infoRanges).length) return infoRanges;
+
+  const nmRanges = run?.checkpoint_info?.normalizer_range_nm;
+  if (nmRanges && Object.keys(nmRanges).length) {
+    return Object.fromEntries(Object.entries(nmRanges).map(([label, range]) => [label, {
+      label,
+      column: `${label}_val`,
+      unit: "nm",
+      min: range.min,
+      max: range.max,
+    }]));
   }
+
   const dataset = state.status?.dataset;
   if (dataset?.available) {
     return {
-      Tx: dataset.tx_nm,
-      Tz: dataset.tz_nm,
+      Tx: { label: "Tx", column: "Tx_val", unit: "nm", min: dataset.tx_nm.min, max: dataset.tx_nm.max },
+      Tz: { label: "Tz", column: "Tz_val", unit: "nm", min: dataset.tz_nm.min, max: dataset.tz_nm.max },
     };
   }
   return null;
 }
 
+function checkpointRange(run = activeCheckpointRun()) {
+  return parameterRanges(run);
+}
+
+function rangeEntries(ranges = checkpointRange()) {
+  return Object.entries(ranges || {}).map(([key, row]) => [key, {
+    label: row.label || key,
+    column: row.column || key,
+    unit: row.unit || "SI",
+    min: Number(row.min),
+    max: Number(row.max),
+  }]);
+}
+
+function primaryRangeEntries(ranges = checkpointRange()) {
+  const entries = rangeEntries(ranges);
+  const tx = entries.find(([key]) => key === "Tx");
+  const tz = entries.find(([key]) => key === "Tz");
+  if (tx && tz) return [tx, tz];
+  return entries.slice(0, 2);
+}
+
+function formatParamRange(row) {
+  if (!row) return "-";
+  const unit = row.unit && row.unit !== "SI" ? ` ${row.unit}` : "";
+  return `${formatNumber(row.min)}-${formatNumber(row.max)}${unit}`;
+}
+
+function formatEnvelope(ranges) {
+  const entries = primaryRangeEntries(ranges);
+  if (!entries.length) return "pending";
+  return entries.map(([, row]) => `${row.label} ${formatParamRange(row)}`).join(" / ");
+}
+
 function checkpointScore(run) {
-  const range = checkpointRange(run);
-  const area = range ? (range.Tx.max - range.Tx.min) * (range.Tz.max - range.Tz.min) : 0;
+  const entries = primaryRangeEntries(checkpointRange(run));
+  const area = entries.length >= 2
+    ? (entries[0][1].max - entries[0][1].min) * (entries[1][1].max - entries[1][1].min)
+    : 0;
   const path = run.path || "";
   return (
     area +
@@ -224,11 +271,19 @@ function recommendedCheckpoint() {
   return [...runs].sort((a, b) => checkpointScore(b) - checkpointScore(a))[0];
 }
 
-function setParamValues(tx, tz) {
-  $("txInput").value = formatNumber(tx, 3);
-  $("tzInput").value = formatNumber(tz, 3);
-  $("txSlider").value = tx;
-  $("tzSlider").value = tz;
+function safeParamId(key) {
+  return String(key).replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function setParamValues(values) {
+  Object.entries(values || {}).forEach(([key, value]) => {
+    state.paramValues[key] = Number(value);
+    const id = safeParamId(key);
+    const slider = $(`paramSlider_${id}`);
+    const input = $(`paramInput_${id}`);
+    if (slider) slider.value = state.paramValues[key];
+    if (input) input.value = formatNumber(state.paramValues[key], 5);
+  });
   updateEnvelopePanels();
 }
 
@@ -240,85 +295,118 @@ function clampToRange(value, range) {
 
 function setRangeControls(centerIfUnset = false) {
   const ranges = checkpointRange();
-  if (!ranges) return;
-  [
-    ["tx", "Tx"],
-    ["tz", "Tz"],
-  ].forEach(([prefix, key]) => {
-    const slider = $(`${prefix}Slider`);
-    slider.min = ranges[key].min;
-    slider.max = ranges[key].max;
-    slider.step = 0.1;
+  const target = $("paramControls");
+  if (!target) return;
+  const entries = rangeEntries(ranges);
+  if (!entries.length) {
+    target.innerHTML = `<div class="empty-state">No parameter ranges available</div>`;
+    return;
+  }
+
+  entries.forEach(([key, row]) => {
+    const current = Number(state.paramValues[key]);
+    state.paramValues[key] = centerIfUnset || !Number.isFinite(current)
+      ? (row.min + row.max) / 2
+      : clampToRange(current, row);
   });
 
-  const txCurrent = Number($("txInput").value);
-  const tzCurrent = Number($("tzInput").value);
-  const tx = centerIfUnset || !Number.isFinite(txCurrent)
-    ? (ranges.Tx.min + ranges.Tx.max) / 2
-    : clampToRange(txCurrent, ranges.Tx);
-  const tz = centerIfUnset || !Number.isFinite(tzCurrent)
-    ? (ranges.Tz.min + ranges.Tz.max) / 2
-    : clampToRange(tzCurrent, ranges.Tz);
-  setParamValues(tx, tz);
+  target.innerHTML = entries.map(([key, row]) => {
+    const id = safeParamId(key);
+    const step = row.unit === "nm" ? 0.1 : Math.max((row.max - row.min) / 500, Number.EPSILON);
+    const value = state.paramValues[key];
+    const unit = row.unit && row.unit !== "SI" ? row.unit : "";
+    return `
+      <label class="slider-row" data-param-key="${escapeHtml(key)}">
+        <span>${escapeHtml(row.label)}</span>
+        <div class="slider-line">
+          <input id="paramSlider_${escapeHtml(id)}" type="range" min="${row.min}" max="${row.max}" step="${step}" value="${value}">
+          <input id="paramInput_${escapeHtml(id)}" class="number-input" type="number" min="${row.min}" max="${row.max}" step="${step}" value="${formatNumber(value, 5)}">
+          <b>${escapeHtml(unit)}</b>
+        </div>
+      </label>
+    `;
+  }).join("");
+
+  entries.forEach(([key]) => {
+    const id = safeParamId(key);
+    const slider = $(`paramSlider_${id}`);
+    const input = $(`paramInput_${id}`);
+    if (!slider || !input) return;
+    slider.addEventListener("input", () => {
+      state.paramValues[key] = Number(slider.value);
+      input.value = formatNumber(state.paramValues[key], 5);
+      updateEnvelopePanels();
+    });
+    input.addEventListener("input", () => {
+      state.paramValues[key] = Number(input.value);
+      slider.value = input.value;
+      updateEnvelopePanels();
+    });
+  });
+
   renderPresets();
 }
 
 function selectedParamsInRange() {
-  const ranges = checkpointRange();
-  if (!ranges) return true;
-  const tx = Number($("txInput").value);
-  const tz = Number($("tzInput").value);
-  return tx >= ranges.Tx.min && tx <= ranges.Tx.max && tz >= ranges.Tz.min && tz <= ranges.Tz.max;
+  return rangeEntries().every(([key, row]) => {
+    const value = Number(state.paramValues[key]);
+    return Number.isFinite(value) && value >= row.min && value <= row.max;
+  });
 }
 
 function renderCheckpointRange() {
   const run = activeCheckpointRun();
-  const checkpointRanges = run?.checkpoint_info?.normalizer_range_nm;
-  const ranges = checkpointRanges || checkpointRange(run);
+  const ranges = checkpointRange(run);
   const target = $("checkpointRange");
   if (!run || !ranges) {
     target.className = "range-card empty";
     target.innerHTML = "No checkpoint range available";
     return;
   }
-  const source = checkpointRanges ? "envelope" : "coverage";
+  const source = run?.checkpoint_info?.parameter_ranges ? "envelope" : "coverage";
   const decoder = run.checkpoint_info?.model_config?.spatial_size || (run.checkpoint_info === null ? "loading" : 200);
+  const rangeRows = rangeEntries(ranges).map(([, row]) => `
+    <div class="range-row"><span>${escapeHtml(row.label)} ${source}</span><strong>${formatParamRange(row)}</strong></div>
+  `).join("");
   target.className = "range-card";
   target.innerHTML = `
-    <div class="range-row"><span>Tx ${source}</span><strong>${formatRange(ranges.Tx)}</strong></div>
-    <div class="range-row"><span>Tz ${source}</span><strong>${formatRange(ranges.Tz)}</strong></div>
+    ${rangeRows}
     <div class="range-row"><span>Decoder</span><strong>${escapeHtml(decoder)}${Number.isFinite(Number(decoder)) ? " px" : ""}</strong></div>
   `;
 }
 
 function renderPresets() {
-  const ranges = checkpointRange();
+  const entries = primaryRangeEntries();
   const target = $("presetList");
-  if (!ranges) {
-    target.innerHTML = "";
+  if (!target || entries.length < 2) {
+    if (target) target.innerHTML = "";
     return;
   }
-  const txMin = ranges.Tx.min;
-  const txMax = ranges.Tx.max;
-  const tzMin = ranges.Tz.min;
-  const tzMax = ranges.Tz.max;
+  const [xEntry, yEntry] = entries;
+  const [xKey, xRange] = xEntry;
+  const [yKey, yRange] = yEntry;
+  const xMin = xRange.min;
+  const xMax = xRange.max;
+  const yMin = yRange.min;
+  const yMax = yRange.max;
   const presets = [
-    { label: "Interior", tx: (txMin + txMax) / 2, tz: (tzMin + tzMax) / 2 },
-    { label: "Thin Edge", tx: txMin + 0.12 * (txMax - txMin), tz: tzMin + 0.12 * (tzMax - tzMin) },
-    { label: "High Tx", tx: txMax - 0.08 * (txMax - txMin), tz: (tzMin + tzMax) / 2 },
-    { label: "High Tz", tx: (txMin + txMax) / 2, tz: tzMax - 0.08 * (tzMax - tzMin) },
+    { label: "Interior", values: { [xKey]: (xMin + xMax) / 2, [yKey]: (yMin + yMax) / 2 } },
+    { label: "Thin Edge", values: { [xKey]: xMin + 0.12 * (xMax - xMin), [yKey]: yMin + 0.12 * (yMax - yMin) } },
+    { label: `High ${xRange.label}`, values: { [xKey]: xMax - 0.08 * (xMax - xMin), [yKey]: (yMin + yMax) / 2 } },
+    { label: `High ${yRange.label}`, values: { [xKey]: (xMin + xMax) / 2, [yKey]: yMax - 0.08 * (yMax - yMin) } },
   ];
-  target.innerHTML = presets.map((preset) => `
-    <button class="preset-button" data-tx="${preset.tx}" data-tz="${preset.tz}">
+  target.innerHTML = presets.map((preset, index) => `
+    <button class="preset-button" data-preset-index="${index}">
       ${escapeHtml(preset.label)}
     </button>
   `).join("");
   target.querySelectorAll("button").forEach((button) => {
     button.addEventListener("click", () => {
-      setParamValues(Number(button.dataset.tx), Number(button.dataset.tz));
+      setParamValues(presets[Number(button.dataset.presetIndex)].values);
     });
   });
 }
+
 
 function renderOverview() {
   const dataset = state.status.dataset;
@@ -361,7 +449,7 @@ function renderDemoReadiness() {
     ? `train ${splits.train} / val ${splits.val ?? 0} / test ${splits.test_holdout ?? 0}`
     : "splits pending";
   $("snapshotHoldout").textContent = holdout ? `${holdout} samples` : "-";
-  $("snapshotEnvelope").textContent = ranges ? `${formatRange(ranges.Tx)} / ${formatRange(ranges.Tz)}` : "pending";
+  $("snapshotEnvelope").textContent = ranges ? formatEnvelope(ranges) : "pending";
   $("snapshotAcquisition").textContent = state.selectedAcquisition ? runLabel(state.selectedAcquisition) : "none";
 }
 
@@ -474,10 +562,10 @@ function renderRuns() {
   }
   $("runList").innerHTML = runs.map((run) => {
     const summary = run.summary || {};
-    const ranges = run.checkpoint_info?.normalizer_range_nm;
+    const ranges = checkpointRange(run);
     const chips = [
       run.checkpoint ? `<span class="chip green">checkpoint</span>` : "",
-      ranges ? `<span class="chip">Tx ${formatRange(ranges.Tx)}</span>` : "",
+      ranges ? `<span class="chip">${escapeHtml(formatEnvelope(ranges))}</span>` : "",
       run.phase_images?.length ? `<span class="chip">phase ${run.phase_images.length}</span>` : "",
       run.reconstruction_images?.length ? `<span class="chip">recon ${run.reconstruction_images.length}</span>` : "",
       run.acquisitions?.length ? `<span class="chip amber">AL ${run.acquisitions.length}</span>` : "",
@@ -504,7 +592,8 @@ function renderPrediction(payload) {
   $("predictionDetailEmpty").textContent = "";
 
   const imageMode = payload.image_mode === "components" ? "Mx/My/Mz" : (payload.image_mode || "field");
-  const label = `${formatNumber(payload.tx_nm)} nm / ${formatNumber(payload.tz_nm)} nm · ${imageMode} · ${payload.device}`;
+  const paramLabel = (payload.params || []).map((row) => `${row.label} ${formatNumber(row.value)}${row.unit && row.unit !== "SI" ? ` ${row.unit}` : ""}`).join(" / ");
+  const label = `${paramLabel || "params"} · ${imageMode} · ${payload.device}`;
   $("predictionLabel").textContent = label;
   $("predictionDetailLabel").textContent = label;
 
@@ -544,19 +633,29 @@ function updateEnvelopePanels() {
   const ranges = checkpointRange();
   const run = activeCheckpointRun();
   const inside = selectedParamsInRange();
-  const tx = Number($("txInput").value);
-  const tz = Number($("tzInput").value);
-  $("predictionEnvelope").innerHTML = ranges ? [
-    `<div class="metric-row"><span>Checkpoint</span><strong>${escapeHtml(pathLabel(run?.path || "-"))}</strong></div>`,
-    `<div class="metric-row"><span>Tx envelope</span><strong>${formatRange(ranges.Tx)}</strong></div>`,
-    `<div class="metric-row"><span>Tz envelope</span><strong>${formatRange(ranges.Tz)}</strong></div>`,
-    `<div class="metric-row"><span>Selected Tx</span><strong>${formatNumber(tx)} nm</strong></div>`,
-    `<div class="metric-row"><span>Selected Tz</span><strong>${formatNumber(tz)} nm</strong></div>`,
-    `<div class="metric-row"><span>Range status</span><strong>${inside ? "inside" : "outside"}</strong></div>`,
-  ].join("") : `<div class="empty-state">No checkpoint envelope</div>`;
+  if (ranges) {
+    const rows = [
+      `<div class="metric-row"><span>Checkpoint</span><strong>${escapeHtml(pathLabel(run?.path || "-"))}</strong></div>`,
+      ...rangeEntries(ranges).flatMap(([key, row]) => {
+        const value = Number(state.paramValues[key]);
+        const unit = row.unit && row.unit !== "SI" ? ` ${row.unit}` : "";
+        const paramInside = Number.isFinite(value) && value >= row.min && value <= row.max;
+        return [
+          `<div class="metric-row"><span>${escapeHtml(row.label)} envelope</span><strong>${formatParamRange(row)}</strong></div>`,
+          `<div class="metric-row"><span>Selected ${escapeHtml(row.label)}</span><strong>${formatNumber(value)}${unit}</strong></div>`,
+          `<div class="metric-row"><span>${escapeHtml(row.label)} status</span><strong>${paramInside ? "inside" : "outside"}</strong></div>`,
+        ];
+      }),
+      `<div class="metric-row"><span>Range status</span><strong>${inside ? "inside" : "outside"}</strong></div>`,
+    ];
+    $("predictionEnvelope").innerHTML = rows.join("");
+  } else {
+    $("predictionEnvelope").innerHTML = `<div class="empty-state">No checkpoint envelope</div>`;
+  }
   renderDemoReadiness();
   renderReconstructions();
 }
+
 
 async function loadCheckpointInfoForSelected() {
   const run = activeCheckpointRun();
@@ -582,9 +681,12 @@ async function runPrediction() {
   if (!checkpoint) return;
   const params = new URLSearchParams({
     checkpoint,
-    tx_nm: $("txInput").value || "50",
-    tz_nm: $("tzInput").value || "50",
     device: $("deviceSelect").value,
+  });
+  rangeEntries().forEach(([key, row]) => {
+    const value = state.paramValues[key];
+    const queryKey = row.unit === "nm" ? `${row.label.toLowerCase()}_nm` : row.label;
+    params.set(queryKey, Number.isFinite(Number(value)) ? String(value) : String((row.min + row.max) / 2));
   });
   $("predictButton").disabled = true;
   $("predictStatus").textContent = "Generating";
@@ -599,6 +701,7 @@ async function runPrediction() {
     $("predictButton").disabled = false;
   }
 }
+
 
 function showView(viewId) {
   document.querySelectorAll(".tab").forEach((button) => {
@@ -624,22 +727,9 @@ async function refresh() {
 }
 
 function bindParamControls() {
-  [
-    ["txSlider", "txInput"],
-    ["tzSlider", "tzInput"],
-  ].forEach(([sliderId, inputId]) => {
-    const slider = $(sliderId);
-    const input = $(inputId);
-    slider.addEventListener("input", () => {
-      input.value = formatNumber(Number(slider.value), 3);
-      updateEnvelopePanels();
-    });
-    input.addEventListener("input", () => {
-      slider.value = input.value;
-      updateEnvelopePanels();
-    });
-  });
+  setRangeControls(true);
 }
+
 
 document.querySelectorAll(".tab").forEach((button) => {
   button.addEventListener("click", () => showView(button.dataset.view));
