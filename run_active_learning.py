@@ -33,6 +33,11 @@ def nm_range(min_nm, max_nm):
     return (float(min_nm) * 1e-9, float(max_nm) * 1e-9)
 
 
+def log_startup(message):
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    print(f"[run_active_learning] {timestamp} {message}", flush=True)
+
+
 def parse_args(argv=None):
     load_env_file()
     parser = argparse.ArgumentParser(
@@ -272,7 +277,7 @@ def prepare_run_paths(args):
             "submission_manifest.json",
         )
 
-    print(f"[run_active_learning] run outputs: {args.results_dir}", flush=True)
+    log_startup(f"run outputs: {args.results_dir}")
     return Path(args.results_dir)
 
 
@@ -302,12 +307,11 @@ def prepare_mutable_run_data(args):
     args.normalizer_path = str(work_dir / "param_normalizer.json")
     args.registry_dir = str(registry_dir)
 
-    print(
-        "[run_active_learning] isolated mutable dataset: "
+    log_startup(
+        "isolated mutable dataset: "
         f"{work_dir} "
         f"(meta={copied['meta']}, fields={copied['fields']}, "
-        f"normalizer={copied['normalizer']}, registry_files={len(copied['registry'])})",
-        flush=True,
+        f"normalizer={copied['normalizer']}, registry_files={len(copied['registry'])})"
     )
     return work_dir
 
@@ -316,37 +320,44 @@ def main(argv=None, *, transport=None):
     args = parse_args(argv)
 
     if args.preflight_only:
+        log_startup("building submission backend for preflight")
         submission_backend = build_submission_backend(args, transport=transport)
         if submission_backend is None or not hasattr(submission_backend, "preflight"):
             raise ValueError("--preflight-only requires --submission-backend amucontainers")
+        log_startup("running submission backend preflight")
         result = submission_backend.preflight()
         print(json.dumps(result, indent=2, sort_keys=True), flush=True)
         return result
 
     prepare_run_paths(args)
+    log_startup("building submission backend")
     submission_backend = build_submission_backend(args, transport=transport)
+    log_startup("submission backend ready")
 
+    log_startup("importing torch and ActiveLearningLoop")
     import torch  # noqa: WPS433
     from active_learning.loop import ActiveLearningLoop  # noqa: WPS433
+    log_startup("imports ready")
 
     device = args.device
     if device == "auto":
+        log_startup("checking CUDA availability")
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     acquisition_min_distance = None
     if args.acquisition_min_distance_nm is not None:
         acquisition_min_distance = float(args.acquisition_min_distance_nm) * 1e-9
 
+    log_startup("preparing mutable run dataset")
     prepare_mutable_run_data(args)
 
-    print(
-        "[run_active_learning] "
+    log_startup(
         f"mode={'submit' if args.submit else 'dry-run'}, "
         f"device={device}, iterations={args.iterations}, epochs={args.epochs}, "
-        f"grid={args.grid_points}x{args.grid_points}, k_new={args.k_new}",
-        flush=True,
+        f"grid={args.grid_points}x{args.grid_points}, k_new={args.k_new}"
     )
 
+    log_startup("constructing ActiveLearningLoop")
     al = ActiveLearningLoop(
         meta_path=args.meta_path,
         fields_path=args.fields_path,
@@ -377,6 +388,7 @@ def main(argv=None, *, transport=None):
         save_checkpoints=not args.no_checkpoints,
         checkpoint_every_epoch=args.checkpoint_every_epoch,
     )
+    log_startup("starting active learning loop")
     al.run(iterations=args.iterations)
     return None
 
